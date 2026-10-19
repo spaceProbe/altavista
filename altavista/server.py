@@ -102,6 +102,7 @@ from . import gateway_client
 from . import profile as profile_loader
 from . import tiles_client
 from .model import Frame, ScenarioData
+from .path_id import PathIdError, validate_path_component_id
 from .pb import core_pb2, trajectory_pb2
 # run_pb2 is not (yet) re-exported by altavista/pb/__init__.py's own explicit import list (that
 # file is not owned by this task) -- imported directly from its real module path, the same way
@@ -824,8 +825,16 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
 
     @app.get("/textures/{file}")
     async def texture(file: str):
-        path = textures / Path(file).name
-        if not path.exists():
+        # `file` is a request path segment (decoded by the ASGI server, so `%2e%2e` has already
+        # become `..`): it must be a path-component id (question 254 item 1) before it is joined
+        # onto the texture directory. Before this, `Path(file).name` let `.` and `..` through
+        # (`textures/..` exists, so the route tried to serve a directory).
+        try:
+            validate_path_component_id(file)
+        except PathIdError as exc:
+            raise HTTPException(400, f"{file!r} is not a texture file name: {exc.detail}") from exc
+        path = textures / file
+        if not path.is_file():
             raise HTTPException(404, f"texture {file!r} not found in {textures}")
         return FileResponse(path)
 

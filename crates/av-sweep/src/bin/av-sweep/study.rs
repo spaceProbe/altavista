@@ -103,6 +103,9 @@ fn load_systems(paths: &[PathBuf]) -> Result<BTreeMap<String, pb::SystemDefiniti
     let mut systems = BTreeMap::new();
     for path in paths {
         let sys = av_kernel::drm::schema::parse_system_definition_yaml(&read_to_string(path)?).map_err(|e| format!("{}: {e}", path.display()))?;
+        // The id becomes `sys_<id>.pb` in every sample directory (`write_sample_inputs`): refused
+        // here, once, before anything is written.
+        av_cdm::path_id::validate_path_component_id(&sys.id).map_err(|e| format!("{}: SystemDefinition.id {:?} cannot name a sample file (sys_<id>.pb): {e}", path.display(), sys.id))?;
         if let Some(_prev) = systems.insert(sys.id.clone(), sys) {
             return Err(format!("two --system files declare the same SystemDefinition.id (last one: {})", path.display()));
         }
@@ -171,6 +174,12 @@ pub struct SampleInputPaths {
 /// factored out of the worker-pool loop specifically so it is unit-testable on its own (this
 /// crate's own `tests::written_sample_files_recompute_the_same_config_hash`).
 pub fn write_sample_inputs(sample_dir: &Path, cfg: &SampleConfig) -> io::Result<SampleInputPaths> {
+    // `sys_<id>.pb` names a file from a `SystemDefinition.id` (untrusted YAML): every id must be a
+    // path component (`av_cdm::path_id`) before the directory or any file is created. `load_systems`
+    // refuses the same ids earlier; this keeps the function safe for any other caller.
+    for id in cfg.systems.keys() {
+        av_cdm::path_id::validate_path_component_id(id).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("SystemDefinition.id {id:?} cannot name a sample file (sys_<id>.pb): {e}")))?;
+    }
     std::fs::create_dir_all(sample_dir)?;
     let drm_pb = sample_dir.join("drm.pb");
     std::fs::write(&drm_pb, cfg.drm.encode_to_vec())?;
@@ -386,6 +395,12 @@ fn run_study_with(args: StudyArgs, exe: &Path, injected: Option<&dyn jobs::JobBa
         return Err(crate::sample_mode::GMAT_STARTUP_REFUSAL.to_string());
     }
     let loaded = preflight(&args)?;
+    // Question 254 item 1: the sweep YAML's `id` becomes `<store-dir>/<id>/`; the file store would
+    // refuse a bad one only after the whole study ran, so say so now, before any sample does.
+    if args.store_dir.is_some() {
+        av_cdm::path_id::validate_path_component_id(&loaded.sweep.id)
+            .map_err(|e| format!("{}: ParameterSweep.id {:?} cannot name a study directory under --store-dir: {e}", args.sweep.display(), loaded.sweep.id))?;
+    }
     // Question 245: open the ClickHouse store first (see the write below for why).
     let clickhouse_store = match &args.clickhouse {
         None => None,
@@ -607,6 +622,56 @@ mod tests {
         assert_eq!(names, vec!["sys_demo_ctrl_sys.pb".to_string(), "sys_leo_demo_sys.pb".to_string()], "id-sorted, sys_<id>.pb naming");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Question 254 item 1: a `SystemDefinition.id` that is not a path component never reaches a
+    /// `join`. The sample directory is pre-seeded with `sys_x/`, so an unchecked id of
+    /// `x/../../evil` would resolve to `<parent of the sample dir>/evil.pb` and be written there;
+    /// instead `write_sample_inputs` refuses it (and `/abs`, `..`, `a\b`, NUL, the empty id) as
+    /// `InvalidInput` before creating anything, and the whole tree around it is unchanged.
+    #[test]
+    fn a_system_id_that_is_not_a_path_component_is_refused_before_any_file_is_written() {
+        fn tree(dir: &Path) -> BTreeMap<String, String> {
+            fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<String, String>) {
+                for entry in std::fs::read_dir(dir).unwrap() {
+                    let entry = entry.unwrap();
+                    let meta = std::fs::symlink_metadata(entry.path()).unwrap();
+                    let rel = entry.path().strip_prefix(base).unwrap().display().to_string();
+                    if meta.is_dir() {
+                        out.insert(rel, "dir".to_string());
+                        walk(base, &entry.path(), out);
+                    } else {
+                        out.insert(rel, format!("{} bytes", meta.len()));
+                    }
+                }
+            }
+            let mut out = BTreeMap::new();
+            walk(dir, dir, &mut out);
+            out
+        }
+        let sweep = pb::ParameterSweep { id: "sweep_test".to_string(), drm_id: "demo_two_instance_drm".to_string(), monte_carlo_draws: 1, ..Default::default() };
+        let sweep_hash = av_sweep::canonical_sweep_hash(&sweep);
+        let good = av_sweep::sample_config(&sweep, &sweep_hash, &fixture_drm(), &fixture_sos(), &fixture_systems(), 0, 0).expect("samples");
+
+        let parent = temp_dir("system-id-traversal");
+        let sample_dir = parent.join("sample_p0_d0");
+        std::fs::create_dir_all(sample_dir.join("sys_x")).unwrap();
+        let before = tree(&parent);
+        for bad in ["x/../../evil", "../x", "..", "/abs/under/parent", "a\\b", "a\0b", "", "%2e%2e%2fx"] {
+            let mut cfg = good.clone();
+            let mut sys = cfg.systems.values().next().unwrap().clone();
+            sys.id = bad.to_string();
+            cfg.systems = BTreeMap::from([(bad.to_string(), sys)]);
+            let Err(err) = write_sample_inputs(&sample_dir, &cfg) else { panic!("{bad:?} must be refused") };
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{bad:?}: {err}");
+            assert!(err.to_string().contains("cannot name a sample file"), "{err}");
+            assert_eq!(tree(&parent), before, "{bad:?}: something was created");
+            assert!(!parent.join("evil.pb").exists());
+        }
+        // The real ids still write.
+        write_sample_inputs(&sample_dir, &good).expect("valid ids still write");
+        assert!(sample_dir.join("sys_leo_demo_sys.pb").is_file());
+        let _ = std::fs::remove_dir_all(&parent);
     }
 
     /// Fast, no GMAT, no child process: a sweep with two grid points where only the SECOND

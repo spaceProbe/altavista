@@ -33,6 +33,7 @@ from .bodies import (ALL_BODIES, BodySampler, _mat_to_quat, coordinate_system,
                      reset_cache as reset_cs_cache, sample_times)
 from .gmat_env import load_gmat
 from .model import DEFAULT_COLORS, Event, Footprint, Frame, ScenarioData, Trajectory, check_model_ref
+from .path_id import PathIdError, validate_path_component_id
 from .timeutil import a1_to_iso, tai_to_a1_mjd
 
 SEC_PER_DAY = 86400.0
@@ -225,6 +226,12 @@ def prepare_script(text: str, frame: Frame, report_dir: str,
                    f"{frame.name}.Axes = {frame.axes};\n")
     files = {}
     for s in sats:
+        # The spacecraft name comes from the script text (or the caller) and becomes
+        # ``<report_dir>/<name>.rpt``: it must be a path-component id (question 254 item 1).
+        try:
+            validate_path_component_id(s)
+        except PathIdError as exc:
+            raise ValueError(f"spacecraft name {s!r} cannot name a report file: {exc.detail}") from exc
         path = os.path.join(report_dir, f"{s}.rpt")
         files[s] = path
         inject += report_block(s, frame.name, path)

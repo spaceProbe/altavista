@@ -57,6 +57,8 @@ from typing import Dict, Optional
 
 import yaml
 
+from .path_id import PathIdError, validate_path_component_id
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 #: Round-3 override slot (question 217(b)) -- see this module's own top doc, step 3. Starts
@@ -116,11 +118,20 @@ def load_imagery_config(
     variable / module constant / packaged-or-in-repo fallback chain instead of the old single
     fixed ``PROFILES_DIR`` constant.
 
+    ``profile_id`` becomes a file name (``<profile_id>.yaml``), so it must be a path-component id
+    (``altavista.path_id``, question 254 item 1: 1 to 128 bytes of ``[A-Za-z0-9._-]`` starting with
+    ``[A-Za-z0-9]``); anything else (``../x``, an absolute path, ``a/b``, ...) is a
+    ``ProfileError`` raised before any path is built.
+
     Raises ``ProfileError`` (never returns a fabricated default) if the profile file
     does not exist, does not parse, or its ``imagery:`` section is missing or missing a
     required key -- the same "no unrecorded approximation" posture
     ``tests/test_profiles.py`` already holds every profile file to.
     """
+    try:
+        validate_path_component_id(profile_id)
+    except PathIdError as exc:
+        raise ProfileError(f"profile id {profile_id!r} cannot name a profile file: {exc.detail}") from exc
     path = resolve_profiles_dir(profiles_dir) / f"{profile_id}.yaml"
     if not path.is_file():
         raise ProfileError(f"no such profile {profile_id!r}: {path} does not exist")

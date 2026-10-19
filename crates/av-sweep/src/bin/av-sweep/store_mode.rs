@@ -11,6 +11,13 @@
 //!   selected store; it is how an existing study (a `sweep_results.pb` from an earlier run, a
 //!   frozen fixture) enters a store without re-running GMAT.
 //!
+//! The study id (`--read-study`'s argument, or the `sweep_id` inside a decoded `--import-study`
+//! file) is untrusted input. With `--store-dir` it becomes a directory name, so the file store
+//! refuses anything that is not a path component (`..`, `a/b`, an absolute path, NUL, ...; the
+//! rule is `av_cdm::path_id`) as `StoreError::InvalidSweepId`, before any path is built; this mode
+//! reports it and writes nothing. When both stores are selected for an import, the file store is
+//! tried first, so a refused id never reaches ClickHouse either. ClickHouse alone takes any id.
+//!
 //! The ClickHouse password is read from the environment variable the flags name; nothing here
 //! prints it, and the errors printed come from `StoreError`, which never carries it.
 
@@ -68,5 +75,87 @@ pub fn run_store(args: StoreArgs) -> Result<(), String> {
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("av-sweep-store-mode-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Every file and directory under `dir` (relative path and size).
+    fn tree(dir: &Path) -> BTreeMap<String, String> {
+        fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<String, String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let meta = std::fs::symlink_metadata(entry.path()).unwrap();
+                let rel = entry.path().strip_prefix(base).unwrap().display().to_string();
+                if meta.is_dir() {
+                    out.insert(rel, "dir".to_string());
+                    walk(base, &entry.path(), out);
+                } else {
+                    out.insert(rel, format!("{} bytes", meta.len()));
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(dir, dir, &mut out);
+        out
+    }
+
+    fn results(sweep_id: &str) -> pb::SweepResults {
+        pb::SweepResults { sweep_id: sweep_id.to_string(), sweep_hash: "h".to_string(), drm_hash: "d".to_string(), ..Default::default() }
+    }
+
+    /// Question 254 item 1, store mode: `--read-study <id>` and `--import-study` (whose id comes
+    /// out of a decoded `sweep_results.pb`) refuse an id that is not a path component with the
+    /// store's typed error text, and neither the store root, its parent nor the output file is
+    /// touched: the whole tree is identical before and after and the traversal target is absent.
+    #[test]
+    fn read_study_and_import_study_refuse_a_traversal_id_and_write_nothing() {
+        let parent = temp_dir("traversal");
+        let root = parent.join("store");
+        let ids = ["../x".to_string(), "..".to_string(), parent.join("x").display().to_string(), "a/b".to_string(), "a\\b".to_string(), "a\0b".to_string(), "%2e%2e%2fx".to_string(), "..%2fx".to_string()];
+        for (n, id) in ids.iter().enumerate() {
+            // The id as a decoder delivers it: encoded into a protobuf, decoded by run_store.
+            let pb_file = parent.join(format!("in{n}.pb"));
+            std::fs::write(&pb_file, results(id).encode_to_vec()).unwrap();
+            let before = tree(&parent);
+
+            let imported = run_store(StoreArgs { op: StoreOp::ImportStudy { pb: pb_file.clone() }, store_dir: Some(root.clone()), clickhouse: None }).unwrap_err();
+            assert!(imported.contains("not a valid sweep_id"), "{id:?}: {imported}");
+            assert_eq!(tree(&parent), before, "import of {id:?} changed the tree");
+
+            let out_pb = parent.join(format!("out{n}.pb"));
+            let read = run_store(StoreArgs { op: StoreOp::ReadStudy { sweep_id: id.clone(), out_pb: out_pb.clone(), out_json: None }, store_dir: Some(root.clone()), clickhouse: None }).unwrap_err();
+            assert!(read.contains("not a valid sweep_id"), "{id:?}: {read}");
+            assert!(!out_pb.exists(), "{id:?}: --out-pb was written");
+            assert_eq!(tree(&parent), before, "read of {id:?} changed the tree");
+            assert!(!parent.join("x").exists() && !root.exists(), "{id:?}");
+        }
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// A valid id still round-trips through import and read.
+    #[test]
+    fn a_valid_id_still_imports_and_reads_back() {
+        let parent = temp_dir("valid");
+        let root = parent.join("store");
+        let pb_file = parent.join("in.pb");
+        std::fs::write(&pb_file, results("study-1").encode_to_vec()).unwrap();
+        run_store(StoreArgs { op: StoreOp::ImportStudy { pb: pb_file }, store_dir: Some(root.clone()), clickhouse: None }).unwrap();
+        let out_pb = parent.join("out.pb");
+        run_store(StoreArgs { op: StoreOp::ReadStudy { sweep_id: "study-1".to_string(), out_pb: out_pb.clone(), out_json: None }, store_dir: Some(root), clickhouse: None }).unwrap();
+        assert_eq!(pb::SweepResults::decode(std::fs::read(out_pb).unwrap().as_slice()).unwrap(), results("study-1"));
+        let _ = std::fs::remove_dir_all(&parent);
     }
 }

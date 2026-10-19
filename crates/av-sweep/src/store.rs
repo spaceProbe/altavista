@@ -47,10 +47,21 @@
 //! to `<root>/<sweep_id>/`. `rename(2)` of a directory onto a non-empty directory fails, so it can
 //! never replace a study.
 //!
+//! - **A `sweep_id` is a path component, validated before any path is built** (question 254 item
+//!   1). The id comes from a sweep YAML's `id`, a decoded `sweep_results.pb` (`--import-study`) or
+//!   `--read-study <id>`: untrusted input. [`av_cdm::path_id::validate_path_component_id`] accepts
+//!   1 to 128 bytes of ASCII `[A-Za-z0-9._-]` whose first byte is `[A-Za-z0-9]`; anything else
+//!   (`..`, `a/b`, a backslash, an absolute path, NUL, any control character, the empty id) is a
+//!   typed [`StoreError::InvalidSweepId`] from `put_study` and `get_study` alike, with no `join`,
+//!   `exists` or `create_dir` having run, so nothing is read or written outside the root. (The
+//!   rule applies to the file store only: ClickHouse takes the id as a SQL value, never a path,
+//!   and has no such restriction.)
 //! - **No half-written study is visible.** A reader sees no directory or the complete one.
 //! - **A crash leaves the old state.** A crash before the rename leaves only a stray
-//!   `.incoming-*` directory, which `list_studies` skips (an operator may delete it; a sweep id
-//!   that itself begins `.incoming-` would be hidden from the listing). A crash cannot leave a different study in place, because nothing is ever replaced.
+//!   `.incoming-*` directory, which `list_studies` skips (an operator may delete it). A sweep id
+//!   can never begin `.incoming-` -- no valid id begins with a dot -- so a staging directory can
+//!   never be mistaken for a study, and a study never hidden from the listing by that prefix. A
+//!   crash cannot leave a different study in place, because nothing is ever replaced.
 //! - **Two writers racing on one id: the first rename wins.** The loser's rename fails, it reads
 //!   the winner and answers as for any existing study: `Ok` if identical, `RefusedWrite` if not.
 //!   (Unlike ClickHouse, whose racing writers are not serialized, the file store serializes them
@@ -65,8 +76,9 @@
 //! - **Healing.** An identical re-put of a study whose `sweep_results.json` or `samples.jsonl`
 //!   is *missing* (the old writer wrote `sweep_results.pb` first and could be killed before the
 //!   others) writes only the missing file. Files that exist are never rewritten.
-//! - **An empty `sweep_id`** is refused with [`StoreError::Io`]: its directory would be `<root>`
-//!   itself.
+//! - **`list_studies` skips a directory whose name is not a valid id**: the store cannot have
+//!   written it (a staging directory, an operator's own folder, a name that is not UTF-8), and
+//!   `get_study` would refuse the name anyway.
 //!
 //! This directory tree is deliberately separate from `--out-dir` (`src/bin/av-sweep/study.rs`'s
 //! own per-sample workspace: `drm.pb`/`sos.pb`/`sys_*.pb`/`stderr.txt`/`run_products.pb` per
@@ -87,7 +99,8 @@ use crate::clickhouse::content_sha256;
 use crate::json;
 
 /// Name prefix of the staging directories `put_study` builds a study in before renaming it into
-/// place; `list_studies` skips them.
+/// place. It begins with a dot, which no valid `sweep_id` can, so a staging directory can never be
+/// a study directory.
 const STAGING_PREFIX: &str = ".incoming-";
 
 /// Every way a study-store operation can be refused -- mirrors `crate::error::SweepError`'s own
@@ -105,6 +118,12 @@ pub enum StoreError {
     /// (truncated write, foreign file, corrupted bytes).
     #[error("{}: does not decode as altavista.v1.SweepResults: {source}", path.display())]
     Decode { path: PathBuf, #[source] source: prost::DecodeError },
+
+    /// `sweep_id` is not usable as a directory name (question 254 item 1): see
+    /// [`av_cdm::path_id`] for the rule. Returned before any path is built, so nothing was read
+    /// or written; the `reason` is the typed [`PathIdError`](av_cdm::path_id::PathIdError).
+    #[error("study id {sweep_id:?} is not a valid sweep_id: {reason}")]
+    InvalidSweepId { sweep_id: String, reason: av_cdm::path_id::PathIdError },
 
     /// A store refused to write study `sweep_id`; `reason` says whether the study already exists
     /// with different content (either backend), or the ClickHouse server refused the insert.
@@ -251,8 +270,11 @@ impl FileStudyStore {
         Self { root: root.as_ref().to_path_buf() }
     }
 
-    fn study_dir(&self, sweep_id: &str) -> PathBuf {
-        self.root.join(sweep_id)
+    /// `<root>/<sweep_id>`, but only for a valid path-component id: the one place an id becomes
+    /// a path, and the validation runs before the `join`.
+    fn study_dir(&self, sweep_id: &str) -> Result<PathBuf, StoreError> {
+        av_cdm::path_id::validate_path_component_id(sweep_id).map_err(|reason| StoreError::InvalidSweepId { sweep_id: sweep_id.to_string(), reason })?;
+        Ok(self.root.join(sweep_id))
     }
 }
 
@@ -322,11 +344,7 @@ fn settle_existing(dir: &Path, existing: &pb::SweepResults, new: &pb::SweepResul
 
 impl StudyStore for FileStudyStore {
     fn put_study(&mut self, results: &pb::SweepResults) -> Result<String, StoreError> {
-        let dir = self.study_dir(&results.sweep_id);
-        if results.sweep_id.is_empty() {
-            let e = std::io::Error::new(std::io::ErrorKind::InvalidInput, "the sweep_id is empty, so the study directory would be the store root itself");
-            return Err(io_err(&dir, e));
-        }
+        let dir = self.study_dir(&results.sweep_id)?;
         if let Some(existing) = self.get_study(&results.sweep_id)? {
             return settle_existing(&dir, &existing, results);
         }
@@ -364,7 +382,7 @@ impl StudyStore for FileStudyStore {
     }
 
     fn get_study(&self, sweep_id: &str) -> Result<Option<pb::SweepResults>, StoreError> {
-        let pb_path = self.study_dir(sweep_id).join("sweep_results.pb");
+        let pb_path = self.study_dir(sweep_id)?.join("sweep_results.pb");
         if !pb_path.exists() {
             return Ok(None);
         }
@@ -385,9 +403,9 @@ impl StudyStore for FileStudyStore {
             if !entry.file_type().map_err(|e| io_err(&entry.path(), e))?.is_dir() {
                 continue; // a study store directory holds only per-sweep-id subdirectories
             }
-            let sweep_id = entry.file_name().to_string_lossy().into_owned();
-            if sweep_id.starts_with(STAGING_PREFIX) {
-                continue; // a writer's staging directory (or one a crashed writer left), not a study
+            let Ok(sweep_id) = entry.file_name().into_string() else { continue }; // not UTF-8: not a valid id
+            if av_cdm::path_id::validate_path_component_id(&sweep_id).is_err() {
+                continue; // not a name this store can have written: a staging directory (`.incoming-*`), an operator's folder, ...
             }
             if let Some(results) = self.get_study(&sweep_id)? {
                 summaries.insert(sweep_id, StudySummary { sweep_id: results.sweep_id.clone(), sweep_hash: results.sweep_hash.clone(), sample_count: results.samples.len() });
@@ -724,9 +742,9 @@ mod tests {
     }
 
     /// A non-empty directory under the id that holds no study is not written into or replaced: a
-    /// typed `Io` error naming it. An empty one is just filled. An empty `sweep_id` is refused.
+    /// typed `Io` error naming it. An empty one is just filled.
     #[test]
-    fn a_directory_that_is_not_a_study_and_an_empty_id_are_typed_io_errors() {
+    fn a_directory_that_is_not_a_study_is_a_typed_io_error() {
         let root = temp_dir("foreign");
         let mut store = FileStudyStore::new(&root);
         std::fs::create_dir_all(root.join("s1")).unwrap();
@@ -739,9 +757,127 @@ mod tests {
 
         std::fs::create_dir_all(root.join("s2")).unwrap();
         store.put_study(&study("s2", vec![sample(0, 0)])).expect("an empty directory is just filled");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
-        let err = store.put_study(&study("", vec![sample(0, 0)])).unwrap_err();
-        assert!(matches!(err, StoreError::Io { .. }), "{err:?}");
+    /// Every file and directory under `dir` (relative path, kind and size), so a test can prove a
+    /// refused call changed nothing anywhere in a whole tree, outside the store root included.
+    fn tree(dir: &Path) -> BTreeMap<String, String> {
+        fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<String, String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let meta = std::fs::symlink_metadata(entry.path()).unwrap();
+                let rel = entry.path().strip_prefix(base).unwrap().display().to_string();
+                if meta.is_dir() {
+                    out.insert(rel, "dir".to_string());
+                    walk(base, &entry.path(), out);
+                } else {
+                    out.insert(rel, format!("{} bytes", meta.len()));
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(dir, dir, &mut out);
+        out
+    }
+
+    /// The ids a traversal attempt would use against the store under `<parent>/store`, whose
+    /// intended victim is `<parent>/x`. The encoded variants are the literal strings a decoder
+    /// has not run over; the decoded ones (`../x`) are what a YAML or protobuf decoder delivers.
+    fn traversal_ids(parent: &Path) -> Vec<String> {
+        vec![
+            "../x".into(),
+            "..".into(),
+            ".".into(),
+            parent.join("x").display().to_string(), // absolute: `Path::join` would replace the root with it
+            "/x".into(),
+            "a/b".into(),
+            "a\\b".into(),
+            "..\\x".into(),
+            "a\0b".into(),
+            "\0".into(),
+            "".into(),
+            "%2e%2e%2fx".into(),
+            "..%2fx".into(),
+            "a%2Fb".into(),
+            ".incoming-1-2-3".into(),
+            "x/../x".into(),
+        ]
+    }
+
+    /// Question 254 item 1: a `sweep_id` that is not a path component is a typed
+    /// `InvalidSweepId` from `put_study` and from `get_study`, and nothing is written outside the
+    /// store root (or inside it): the whole parent tree is identical before and after, and the
+    /// traversal's target `x` does not exist.
+    #[test]
+    fn a_sweep_id_that_is_not_a_path_component_is_refused_and_nothing_is_written() {
+        let parent = temp_dir("traversal");
+        let root = parent.join("store");
+        let mut store = FileStudyStore::new(&root);
+        store.put_study(&study("s1", vec![sample(0, 0)])).unwrap();
+        let before = tree(&parent);
+        assert!(before.contains_key("store/s1/sweep_results.pb"));
+
+        for id in traversal_ids(&parent) {
+            let put = store.put_study(&study(&id, vec![sample(0, 0)])).unwrap_err();
+            assert!(matches!(&put, StoreError::InvalidSweepId { sweep_id, .. } if *sweep_id == id), "put_study({id:?}): {put:?}");
+            let got = match store.get_study(&id) {
+                Err(e) => e,
+                Ok(r) => panic!("get_study({id:?}) must be refused, got {r:?}"),
+            };
+            assert!(matches!(&got, StoreError::InvalidSweepId { sweep_id, .. } if *sweep_id == id), "get_study({id:?}): {got:?}");
+            assert!(put.to_string().contains("not a valid sweep_id"), "{put}");
+            assert_eq!(tree(&parent), before, "{id:?}: the tree around the store changed");
+            assert!(!parent.join("x").exists(), "{id:?}: wrote the traversal target");
+        }
+        // The valid study is untouched and still the only one listed.
+        assert_eq!(store.list_studies().unwrap().iter().map(|s| s.sweep_id.as_str()).collect::<Vec<_>>(), vec!["s1"]);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// Every refused id in the shared vectors (`data/path_component_id_vectors.json`, the file the
+    /// rule's own tests read) is refused by the store with the rule's typed reason, and every
+    /// accepted one is a usable study id.
+    #[test]
+    fn the_shared_vectors_decide_what_the_store_accepts() {
+        let vectors: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/path_component_id_vectors.json")).unwrap()).unwrap();
+        let parent = temp_dir("vectors");
+        let root = parent.join("store");
+        let mut store = FileStudyStore::new(&root);
+        let before = tree(&parent);
+        for entry in vectors["refused"].as_array().unwrap() {
+            let id = entry["id"].as_str().unwrap();
+            match store.put_study(&study(id, vec![sample(0, 0)])) {
+                Err(StoreError::InvalidSweepId { reason, .. }) => assert_eq!(reason.reason(), entry["reason"].as_str().unwrap(), "{id:?}"),
+                other => panic!("{id:?} must be refused as an invalid sweep_id, got {other:?}"),
+            }
+        }
+        assert_eq!(tree(&parent), before, "no refusal created the store root or anything else");
+        // One store per accepted id: `a` and `A` are different ids that name one directory on a
+        // case-insensitive filesystem (macOS's default), where the second would be a typed
+        // `RefusedWrite` (different content under an existing id), never an overwrite.
+        for (n, id) in vectors["accepted"].as_array().unwrap().iter().enumerate() {
+            let id = id.as_str().unwrap();
+            let mut own = FileStudyStore::new(parent.join(format!("accepted-{n}")));
+            own.put_study(&study(id, vec![sample(0, 0)])).unwrap_or_else(|e| panic!("{id:?} must be accepted: {e}"));
+            assert!(own.get_study(id).unwrap().is_some(), "{id:?}");
+        }
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// `list_studies` skips a directory whose name the store could not have written, even when it
+    /// holds a decodable `sweep_results.pb`; a valid one beside it is listed.
+    #[test]
+    fn list_studies_skips_directories_whose_names_are_not_valid_ids() {
+        let root = temp_dir("list-invalid");
+        let mut store = FileStudyStore::new(&root);
+        store.put_study(&study("good", vec![sample(0, 0)])).unwrap();
+        for name in [".hidden", "has space", "a%b", "-dash", "caf\u{e9}"] {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("sweep_results.pb"), study("ghost", vec![sample(0, 0)]).encode_to_vec()).unwrap();
+        }
+        assert_eq!(store.list_studies().unwrap().iter().map(|s| s.sweep_id.as_str()).collect::<Vec<_>>(), vec!["good"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

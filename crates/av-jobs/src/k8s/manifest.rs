@@ -483,6 +483,15 @@ mod tests {
         assert_eq!(label_value(&format!("{}-", "y".repeat(62))), "y".repeat(62), "a value cut to 63 characters is re-trimmed");
         assert_eq!(dns_fragment("Job_ID/1", 24), "job-id-1");
         assert_eq!(dns_fragment("!!!", 24), "job");
+        // Question 254 item 1 (audit: unreachable by a hostile `job_id`): the scratch directory is
+        // `av-job-<dns_fragment>-<suffix>`, and a fragment holds only [a-z0-9-], so it is always
+        // exactly one `Normal` path component under the scratch root.
+        for hostile in ["../x", "..", "/abs/path", "a/b", "a\\b", "a\0b", "%2e%2e%2fx", ""] {
+            let name = format!("av-job-{}-1-2", dns_fragment(hostile, 24));
+            let comps: Vec<_> = std::path::Path::new(&name).components().collect();
+            assert!(comps.len() == 1 && matches!(comps[0], std::path::Component::Normal(_)), "{hostile:?} -> {name:?}");
+            assert!(name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'), "{name:?}");
+        }
         assert_eq!(dns_fragment(&"a".repeat(40), 24).len(), 24);
         assert_eq!(dns_fragment("ab-cd", 3), "ab", "a fragment cut at a hyphen is re-trimmed");
     }

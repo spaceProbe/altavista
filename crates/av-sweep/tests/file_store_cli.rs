@@ -133,3 +133,130 @@ fn rerunning_a_study_into_one_store_is_ok_with_the_same_out_dir_and_refused_with
     assert!(out_b.join("sweep_results.pb").is_file(), "the study itself finished and is in its --out-dir");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- question 254 item 1: an id that becomes a path is one path component -----------------------
+
+/// Every file and directory under `dir` (relative path and size).
+fn tree(dir: &Path) -> std::collections::BTreeMap<String, String> {
+    fn walk(base: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, String>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let meta = std::fs::symlink_metadata(entry.path()).unwrap();
+            let rel = entry.path().strip_prefix(base).unwrap().display().to_string();
+            if meta.is_dir() {
+                out.insert(rel, "dir".to_string());
+                walk(base, &entry.path(), out);
+            } else {
+                out.insert(rel, format!("{} bytes", meta.len()));
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(dir, dir, &mut out);
+    out
+}
+
+fn assert_refused_as_an_id(output: &Output, what: &str) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{what}: must exit non-zero: {stderr}");
+    assert!(output.status.code().is_some(), "{what}: exited normally, not by a signal");
+    assert!(!stderr.contains("panicked"), "{what}: a typed error, not a panic: {stderr}");
+}
+
+/// `--import-study` of a file whose decoded `sweep_id` is a traversal, and `--read-study` of one,
+/// through the real binary: refused, non-zero, and the tree around the store is untouched.
+#[test]
+fn a_traversal_sweep_id_is_refused_by_import_and_read_and_nothing_is_written() {
+    let dir = scratch("traversal");
+    let store = dir.join("store");
+    let valid = dir.join("valid.pb");
+    std::fs::write(&valid, study("good", "/out/sample_p0_d0").encode_to_vec()).unwrap();
+    assert!(import(&valid, &store).status.success());
+
+    let ids = ["../x".to_string(), "..".to_string(), dir.join("x").display().to_string(), "a/b".to_string(), "a\\b".to_string(), "a\0b".to_string(), "%2e%2e%2fx".to_string(), "..%2fx".to_string()];
+    for (n, id) in ids.iter().enumerate() {
+        let pb_path = dir.join(format!("bad{n}.pb"));
+        std::fs::write(&pb_path, study(id, "/out/sample_p0_d0").encode_to_vec()).unwrap();
+        let before = tree(&dir);
+        let out = import(&pb_path, &store);
+        assert_refused_as_an_id(&out, &format!("import {id:?}"));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("not a valid sweep_id"), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(tree(&dir), before, "import of {id:?} changed the tree");
+
+        // --read-study takes the id on the command line (an argument cannot hold a NUL; the OS
+        // refuses to spawn, which is its own refusal).
+        if !id.contains('\0') {
+            let out_pb = dir.join(format!("read{n}.pb"));
+            let out = Command::new(av_sweep_bin()).arg("--read-study").arg(id).arg("--out-pb").arg(&out_pb).arg("--store-dir").arg(&store).output().unwrap();
+            assert_refused_as_an_id(&out, &format!("read {id:?}"));
+            assert!(String::from_utf8_lossy(&out.stderr).contains("not a valid sweep_id"), "{}", String::from_utf8_lossy(&out.stderr));
+            assert!(!out_pb.exists());
+            assert_eq!(tree(&dir), before, "read of {id:?} changed the tree");
+        }
+        assert!(!dir.join("x").exists(), "{id:?}: wrote the traversal target");
+    }
+    // The valid study is intact and a valid id still reads back.
+    let out_pb = dir.join("good.out.pb");
+    let out = Command::new(av_sweep_bin()).arg("--read-study").arg("good").arg("--out-pb").arg(&out_pb).arg("--store-dir").arg(&store).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `text` with the line starting `key:` replaced by `replacement`.
+fn replace_line(text: &str, key: &str, replacement: &str) -> String {
+    let mut done = false;
+    let lines: Vec<String> = text
+        .lines()
+        .map(|l| {
+            if !done && l.starts_with(key) {
+                done = true;
+                replacement.to_string()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    assert!(done, "no line starts with {key}");
+    lines.join("\n") + "\n"
+}
+
+/// Study mode, YAML inputs: a sweep whose `id` is `../x` (hash recomputed so the file is
+/// otherwise valid) is refused in preflight when `--store-dir` is given, before `--out-dir` is
+/// created or any sample runs; a `SystemDefinition.id` of `../x` is refused before anything is
+/// written. Nothing appears outside the scratch folder's inputs.
+#[test]
+fn a_traversal_id_in_a_sweep_or_system_yaml_is_refused_before_any_sample_runs() {
+    let dir = scratch("yaml");
+    let sweep_text = std::fs::read_to_string(drms_path("leo_orbital_native_sweep.sweep.yaml")).unwrap();
+    let mut sweep = av_sweep::parse_sweep_yaml(&sweep_text).unwrap();
+    sweep.id = "../x".to_string();
+    let hash = av_sweep::canonical_sweep_hash(&sweep);
+    let bad_sweep = dir.join("bad.sweep.yaml");
+    std::fs::write(&bad_sweep, replace_line(&replace_line(&sweep_text, "id:", "id: ../x"), "hash:", &format!("hash: \"{hash}\""))).unwrap();
+    let sys_text = std::fs::read_to_string(drms_path("leo_1day_orbital_native.system.yaml")).unwrap();
+    let bad_system = dir.join("bad.system.yaml");
+    std::fs::write(&bad_system, replace_line(&sys_text, "id:", "id: ../x")).unwrap();
+    let before = tree(&dir);
+
+    let study_cmd = |sweep_yaml: &Path, system_yaml: &Path, out_dir: &Path, store: Option<&Path>| {
+        let mut cmd = Command::new(av_sweep_bin());
+        cmd.arg("--sweep").arg(sweep_yaml).arg("--drm").arg(drms_path("leo_orbital_native_sweep.drm.yaml")).arg("--sos").arg(drms_path("leo_orbital_native_sweep.sos.yaml"));
+        cmd.arg("--system").arg(system_yaml).arg("--out-dir").arg(out_dir).arg("--workers").arg("2");
+        if let Some(store) = store {
+            cmd.arg("--store-dir").arg(store);
+        }
+        cmd.output().unwrap()
+    };
+
+    let out = study_cmd(&bad_sweep, &drms_path("leo_1day_orbital_native.system.yaml"), &dir.join("out"), Some(&dir.join("store")));
+    assert_refused_as_an_id(&out, "sweep id ../x");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("cannot name a study directory"), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(tree(&dir), before, "refused before --out-dir or the store was created");
+
+    let out = study_cmd(&drms_path("leo_orbital_native_sweep.sweep.yaml"), &bad_system, &dir.join("out"), Some(&dir.join("store")));
+    assert_refused_as_an_id(&out, "system id ../x");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("cannot name a sample file"), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(tree(&dir), before);
+    assert!(!dir.join("x").exists() && !dir.join("x.pb").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
