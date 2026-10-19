@@ -266,6 +266,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -710,6 +711,47 @@ def pin_problems(platforms: object) -> list[str]:
                 ok = isinstance(v, int) and not isinstance(v, bool) and v >= 0
             if not ok:
                 problems.append(f"{key}.{field}: {v!r} is not valid")
+    return problems
+
+
+_VARIANT_NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+
+def variant_problems(variants: object, platforms: object) -> list[str]:
+    """What is wrong with a component's optional `variants` (empty list: nothing; absent is `None`, no
+    variants). Question 257: a platform with more than one pinned release (Linux x86_64: NASA's Ubuntu
+    and RHEL 7 archives) maps to `{default, pins}`, `pins` naming each variant's key in `platforms`.
+    The platform's own key is the default variant's pin, so `platforms` read alone still gives the
+    default; every other variant's key is a pinned `platforms` entry that is not itself a platform with
+    variants. Variant names are lower-case `[a-z0-9-]`."""
+    if variants is None:
+        return []
+    if not isinstance(variants, dict) or not variants:
+        return ["`variants` is present but not a non-empty object"]
+    if not isinstance(platforms, dict):
+        return ["`variants` needs `platforms`"]
+    problems: list[str] = []
+    for platform, entry in variants.items():
+        where = f"variants.{platform}"
+        if platforms.get(platform) is None:
+            problems.append(f"{where}: {platform!r} is not a pinned platform")
+        if not isinstance(entry, dict) or not isinstance(entry.get("pins"), dict) or len(entry["pins"]) < 2:
+            problems.append(f"{where}: must be {{default, pins}} with at least two pins")
+            continue
+        pins, default = entry["pins"], entry.get("default")
+        if default not in pins:
+            problems.append(f"{where}.default: {default!r} is not one of {sorted(pins)}")
+        elif pins[default] != platform:
+            problems.append(f"{where}.pins.{default}: the default variant's pin must be the platform's own key {platform!r}")
+        for name, key in pins.items():
+            if not isinstance(name, str) or not _VARIANT_NAME.fullmatch(name):
+                problems.append(f"{where}.pins: {name!r} is not a lower-case variant name")
+            if not isinstance(key, str) or platforms.get(key) is None:
+                problems.append(f"{where}.pins.{name}: {key!r} is not a pinned key of `platforms`")
+            elif key != platform and key in variants:
+                problems.append(f"{where}.pins.{name}: {key!r} is itself a platform with variants")
+        if len(set(pins.values())) != len(pins):
+            problems.append(f"{where}.pins: two variants name the same pin")
     return problems
 
 

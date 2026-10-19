@@ -53,20 +53,13 @@
           "sourceforge_sha1": "15bb6057a25853ea68f2c0c781e030d4beae3348",
           "url": "https://sourceforge.net/projects/gmat/files/GMAT/GMAT-R2026a/gmat-ubuntu-x64-R2026a.tar.gz/download"
         },
-        "linux-x86_64-rhel7-measured-not-pinned": {
+        "linux-x86_64-rhel7": {
           "bytes": 438017278,
           "final_url": "https://master.dl.sourceforge.net/project/gmat/GMAT/GMAT-R2026a/gmat-rhel7-x64-R2026a.tar.gz",
           "fetched": "2026-10-18, once (question 154), curl -fL --proto =https, TLS verified",
           "file": "gmat-rhel7-x64-R2026a.tar.gz",
-          "measured": {
-            "content_hash": "sha256:3db3afed6d28291932f8ed4d06f20b2df09298b3e02f8a50e156c22b82b3975c",
-            "file_count": 2043,
-            "symlink_count": 100,
-            "symlink_listing_hash": "sha256:041a4fffcbd08b17664951fa02eff53627cff2e256cccafc6299348641bd0a8e",
-            "total_bytes": 774131578
-          },
-          "note": "the second Linux archive NASA publishes, a different tree from the Ubuntu one; a platform key holds one pin, and SourceForge's own default Linux download is the Ubuntu archive, so this one is recorded and not pinned",
-          "pinned": false,
+          "note": "the second Linux archive NASA publishes, a different tree from the Ubuntu one; pinned as the rhel7 variant of linux-x86_64 (question 257), chosen with --gmat-variant rhel7. The pin is question 254's measurement of the unpacked GMAT/R2026a; the archive was not on this host in question 257's round, so it was not re-measured and was not re-fetched",
+          "pinned": true,
           "root_in_archive": "GMAT/R2026a",
           "sha256": "sha256:3262cf77c3932855180f346705605a89306ffd6cff15d70ad8bdafdfc0b614cd",
           "sourceforge_md5": "f4e5e3668f447833d29bac40e33d99c9",
@@ -93,6 +86,13 @@
           "symlink_listing_hash": "sha256:fe5ab4958e93ae79ade6b18dde99572e63f47c880bc51590efd66e0452401948",
           "total_bytes": 689762981
         },
+        "linux-x86_64-rhel7": {
+          "content_hash": "sha256:3db3afed6d28291932f8ed4d06f20b2df09298b3e02f8a50e156c22b82b3975c",
+          "file_count": 2043,
+          "symlink_count": 100,
+          "symlink_listing_hash": "sha256:041a4fffcbd08b17664951fa02eff53627cff2e256cccafc6299348641bd0a8e",
+          "total_bytes": 774131578
+        },
         "macos-arm64": {
           "content_hash": "sha256:d21cddbbffbd3c44982bd98a7fb3a221b79ae6e26f2696eff4046f745d1eca39",
           "file_count": 2060,
@@ -106,8 +106,17 @@
         "exclude_dir_names": ["__pycache__"],
         "exclude_paths": ["output", "bin/api_startup_file.txt"]
       },
+      "variants": {
+        "linux-x86_64": {
+          "default": "ubuntu",
+          "pins": {
+            "rhel7": "linux-x86_64-rhel7",
+            "ubuntu": "linux-x86_64"
+          }
+        }
+      },
       "verification": {
-        "method": "manifest.measure_tree over the operator's unpacked tree under the pin's scope, compared with the pin for the named platform (content hash, file count, total bytes, symlink count, symlink listing hash)",
+        "method": "manifest.measure_tree over the operator's unpacked tree under the pin's scope, compared with the pin for the named platform and, on a platform with variants, for the chosen variant only (content hash, file count, total bytes, symlink count, symlink listing hash)",
         "step": "files"
       },
       "why": "GMAT R2026a bundles OpenSceneGraph and wxWidgets (LGPL); the kit records GMAT's pack descriptor and never carries its bytes (docs/kit-operator-supplied.md item 3). The installer measures the operator's unpacked release and compares it with the pin for the target platform"

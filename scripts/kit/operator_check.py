@@ -60,6 +60,7 @@ Line shape (two spaces between the three fields):
 
     operator-supplied: ubuntu-22.04-base-image  required (base of cfs-image)  verified sha256:2edbbc5dc405… via Id
     operator-supplied: gmat-r2026a  required (packs.gmat)  verified macos-arm64 sha256:d21cddbbffbd… 2060 files
+    operator-supplied: gmat-r2026a  required (packs.gmat)  verified linux-x86_64 (rhel7) sha256:3db3afed6d28… 2043 files
     operator-supplied: gmat-r2026a  required (packs.gmat)  verified by the files install, not here (...)
     operator-supplied: clickhouse  outside the kit, not verified (not declared; held pending licence review, q247)
 
@@ -180,7 +181,7 @@ def pins_problems(pins: object) -> list[str]:
     """What is wrong with the pins file's `components` (empty list: nothing): every component has an
     integer `item` (unique), a known `kind`, `licences`, `why`, and a `verification` whose `step` is the
     one `STEP_OF_KIND` gives for the kind; images carry a `reference` pinned by their `digest`; a tree
-    carries its `pack`, `platforms` and `scope`."""
+    carries its `pack`, `platforms`, `scope` and, optionally, `variants`."""
     if not isinstance(pins, dict) or not pins:
         return ["`components` is missing or not a non-empty object"]
     problems: list[str] = []
@@ -232,6 +233,7 @@ def pins_problems(pins: object) -> list[str]:
             if not isinstance(pin.get("pack"), str):
                 problems.append(f"{cid}.pack: missing")
             problems += [f"{cid}.{p}" for p in kit_manifest.pin_problems(pin.get("platforms"))]
+            problems += [f"{cid}.{p}" for p in kit_manifest.variant_problems(pin.get("variants"), pin.get("platforms"))]
             problems += [f"{cid}.{p}" for p in kit_manifest.scope_problems(pin.get("scope"))]
     return problems
 
@@ -493,28 +495,56 @@ def _describe_pin(pin: dict) -> str:
     )
 
 
-def _describe_pins(platforms: dict) -> str:
+def _variant_keys(variants: Optional[dict]) -> dict[str, tuple[str, str]]:
+    """`{pin key: (platform, variant name)}` for every variant's pin that is not its platform's own key
+    (question 257: `linux-x86_64-rhel7` -> `("linux-x86_64", "rhel7")`). Such a key is a pin, not a
+    platform: it is chosen with `--<pack>-variant`, never with `--<pack>-platform`."""
+    out: dict[str, tuple[str, str]] = {}
+    for platform, entry in (variants or {}).items():
+        for name, key in entry["pins"].items():
+            if key != platform:
+                out[key] = (platform, name)
+    return out
+
+
+def _describe_pins(platforms: dict, variants: Optional[dict] = None, pack: str = "gmat") -> str:
+    alias = _variant_keys(variants)
+
+    def label(key: str) -> str:
+        if key in alias:
+            of, name = alias[key]
+            return f"{key} (the {name} variant of {of}: --{pack}-platform {of} --{pack}-variant {name})"
+        if variants and key in variants:
+            return f"{key} (the {variants[key]['default']} variant, the default)"
+        return key
+
     pinned = {k: v for k, v in sorted(platforms.items()) if v is not None}
-    return "; ".join(f"{k}: {_describe_pin(v)}" for k, v in pinned.items()) or "(none)"
+    return "; ".join(f"{label(k)}: {_describe_pin(v)}" for k, v in pinned.items()) or "(none)"
 
 
 def verify_gmat_tree(
     pin_id: str, pin: dict, requirement: Requirement, *,
-    entry: Optional[dict], root: Optional[str], platform: Optional[str],
+    entry: Optional[dict], root: Optional[str], platform: Optional[str], variant: Optional[str] = None,
 ) -> Verification:
     """The operator's unpacked tree for a `data-tree` pin (GMAT), measured under the pin's `scope` and
-    compared with the pin recorded for `platform`. `entry` is the kit's `packs.<pack>` entry. Reads
-    nothing but `root`, which it never writes or copies. Refusal order, cheapest first, the hash last:
-    the kit's marker, the pin, no root, root not a directory, no platform, no pin for the platform,
-    then the measurement. Codes are `<pack>-...` (`gmat-root-missing`, `gmat-descriptor-differs`, ...)."""
+    compared with the pin recorded for `platform` and, on a platform with `variants` (question 257:
+    Linux x86_64, `ubuntu` by default or `rhel7`), for the chosen `variant` only. `entry` is the kit's
+    `packs.<pack>` entry. Reads nothing but `root`, which it never writes or copies. Refusal order,
+    cheapest first, the hash last: the kit's marker, the pin, no root, root not a directory, no
+    platform, a variant's pin key given as the platform, no pin for the platform, a variant on a
+    platform without variants or an unknown variant, then the measurement. A tree that differs from the
+    chosen pin and equals another variant's pin is refused naming that variant and the option to pass
+    (`<pack>-matches-other-variant`); one that equals none is `<pack>-descriptor-differs`. Codes are
+    `<pack>-...` (`gmat-root-missing`, `gmat-descriptor-differs`, ...)."""
     pack = pin["pack"]
     base = dict(
         component=pin_id, item=pin["item"], kind=pin["kind"], step=STEP_FILES, required=True,
         requirement=requirement.text,
     )
 
-    def refused(code: str, reason: str, expected: Any = None, found: Any = None) -> Verification:
-        return Verification(outcome=REFUSED, code=f"{pack}-{code}", reason=reason, expected=expected, found=found, **base)
+    def refused(code: str, reason: str, expected: Any = None, found: Any = None, detail: Optional[dict] = None) -> Verification:
+        return Verification(outcome=REFUSED, code=f"{pack}-{code}", reason=reason, expected=expected, found=found,
+                            detail=detail or {}, **base)
 
     marker = (entry or {}).get("operator_supplied")
     if (entry or {}).get("copied") or not isinstance(marker, dict) or marker.get("component") != pin_id:
@@ -524,19 +554,23 @@ def verify_gmat_tree(
             f"operator_supplied={marker!r}) -- a kit built before question 250(a), task 2, or by another "
             f"builder; this installer will not skip the check for it. Rebuild the kit with --with-pack {pack}.",
         )
-    platforms, scope = pin.get("platforms"), pin.get("scope")
-    problems = kit_manifest.pin_problems(platforms) + kit_manifest.scope_problems(scope)
+    platforms, scope, variants = pin.get("platforms"), pin.get("scope"), pin.get("variants")
+    problems = (kit_manifest.pin_problems(platforms) + kit_manifest.variant_problems(variants, platforms)
+                + kit_manifest.scope_problems(scope))
     if problems:
         return refused("pin-malformed", f"the installer's pins file: {pin_id!r}: " + "; ".join(problems))
+    variants = variants or {}
+    alias = _variant_keys(variants)
     item = pin.get("item")
     pinned = {k: v for k, v in platforms.items() if v is not None}
-    flag = f"--{pack}-root"
+    flag, pflag, vflag = f"--{pack}-root", f"--{pack}-platform", f"--{pack}-variant"
     if root is None:
         return refused(
             "root-missing",
             f"this kit needs GMAT R2026a (operator-supplied: docs/kit-operator-supplied.md item {item}); the kit "
             f"does not carry it. Unpack GMAT R2026a for the target platform and pass {flag} PATH and "
-            f"--{pack}-platform KEY. Pinned platforms: {_describe_pins(platforms)}",
+            f"{pflag} KEY (and, on a platform with variants, {vflag} NAME). Pinned platforms: "
+            f"{_describe_pins(platforms, variants, pack)}",
             expected={k: v for k, v in sorted(pinned.items())},
         )
     if not Path(root).is_dir():
@@ -544,18 +578,45 @@ def verify_gmat_tree(
     if platform is None:
         return refused(
             "platform-missing",
-            f"--{pack}-platform KEY is required with {flag} (never guessed from this host: the installer may "
-            f"run in a Linux container over a macOS tree). Pinned platforms: {_describe_pins(platforms)}",
+            f"{pflag} KEY is required with {flag} (never guessed from this host: the installer may "
+            f"run in a Linux container over a macOS tree). Pinned platforms: {_describe_pins(platforms, variants, pack)}",
         )
-    pin_for_platform = platforms.get(platform)
-    if pin_for_platform is None:
+    if platform in alias:
+        of, name = alias[platform]
+        return refused(
+            "platform-is-a-variant",
+            f"{platform!r} is the pin of the {name} variant of {of}, not a platform key: pass {pflag} {of} {vflag} {name}",
+        )
+    if platforms.get(platform) is None:
         return refused(
             "no-pin-for-platform",
-            f"no GMAT pin is recorded for platform {platform!r}. Platforms with a pin: {sorted(pinned)}; "
-            f"known platforms without one: {sorted(k for k, v in platforms.items() if v is None)}. A pin for a new "
+            f"no GMAT pin is recorded for platform {platform!r}. Platforms with a pin: "
+            f"{sorted(k for k in pinned if k not in alias)}; known platforms without one: "
+            f"{sorted(k for k, v in platforms.items() if v is None)}. A pin for a new "
             f"platform is added when a kit is built for it (scripts/kit/README.md, 'GMAT is operator-supplied')",
         )
-    print(f"verifying GMAT at {root!r} against the {platform} pin (reads every file once) ...", file=sys.stderr, flush=True)
+    choices = variants.get(platform)
+    if choices is None:
+        if variant is not None:
+            return refused(
+                "variant-not-applicable",
+                f"{vflag} {variant!r} was given, but platform {platform!r} has one GMAT pin and no variants "
+                f"(platforms with variants: {sorted(variants) or 'none'}). Drop {vflag}.",
+            )
+        chosen, chosen_by, pin_key = None, None, platform
+    else:
+        chosen = choices["default"] if variant is None else variant
+        chosen_by = "default" if variant is None else "option"
+        if chosen not in choices["pins"]:
+            return refused(
+                "variant-unknown",
+                f"{vflag} {variant!r} is not a variant of {platform}: its variants are {sorted(choices['pins'])} "
+                f"(default {choices['default']!r})",
+            )
+        pin_key = choices["pins"][chosen]
+    pin_for_platform = platforms[pin_key]
+    label = platform if chosen is None else f"{platform} {chosen} ({pin_key}, {'the default' if chosen_by == 'default' else vflag + ' ' + chosen})"
+    print(f"verifying GMAT at {root!r} against the {label} pin (reads every file once) ...", file=sys.stderr, flush=True)
     try:
         found = kit_manifest.measure_tree(Path(root), scope)
     except OSError as e:
@@ -563,9 +624,25 @@ def verify_gmat_tree(
                        expected=pin_for_platform)
     differs = kit_manifest.compare_to_pin(found, pin_for_platform)
     if differs:
+        matches = [
+            (name, key) for name, key in sorted((choices or {}).get("pins", {}).items())
+            if key != pin_key and kit_manifest.compare_to_pin(found, platforms[key]) == []
+        ]
+        if matches:
+            name, key = matches[0]
+            return refused(
+                "matches-other-variant",
+                f"the GMAT tree at {root!r} is the {name} variant of {platform}: it equals the {key} pin "
+                f"({_describe_pin(platforms[key])}). The {chosen} variant was chosen "
+                f"({'the default' if chosen_by == 'default' else vflag + ' ' + chosen}), whose pin {pin_key} it is not "
+                f"({_describe_pin(pin_for_platform)}). To install against this tree, pass {pflag} {platform} "
+                f"{vflag} {name}. Not installing against a variant that was not chosen.",
+                expected=pin_for_platform, found=found,
+                detail={"platform": platform, "variant": chosen, "matches_variant": name, "matches_pin": key},
+            )
         return refused(
             "descriptor-differs",
-            f"the GMAT tree at {root!r} is not what the {platform} pin records (differs in "
+            f"the GMAT tree at {root!r} is not what the {label} pin records (differs in "
             f"{', '.join(differs)}). expected: {_describe_pin(pin_for_platform)}. found: {_describe_pin(found)}. Not "
             f"installing against a GMAT that is not the pinned release.",
             expected=pin_for_platform, found=found,
@@ -573,14 +650,17 @@ def verify_gmat_tree(
     record = {
         "required": True, "verified": True, "copied": False,
         "component": pin_id, "item": item,
-        "platform": platform, "root": root,
+        "platform": platform, "variant": chosen, "variant_chosen_by": chosen_by, "pin_key": pin_key,
+        "root": root,
         "found": found, "pin": pin_for_platform, "scope": scope,
         "not_covered": pin.get("not_covered", []),
     }
-    summary = f"{platform} {short(found['content_hash'])} {found['file_count']} files"
+    summary = f"{platform}{'' if chosen is None else ' (' + chosen + ')'} {short(found['content_hash'])} {found['file_count']} files"
     return Verification(
         outcome=VERIFIED, expected=pin_for_platform, found=found,
-        detail={"platform": platform, "root": root, "summary": summary, "record": record}, **base,
+        detail={"platform": platform, "variant": chosen, "pin_key": pin_key, "root": root, "summary": summary,
+                "record": record},
+        **base,
     )
 
 
