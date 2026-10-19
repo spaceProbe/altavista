@@ -15,6 +15,7 @@ for a real model at RPO range, not merely present.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -46,6 +47,11 @@ def data() -> dict:
     )
     assert proc.returncode == 0, (
         f"node {CHECK.name} exited {proc.returncode}\nstdout: {proc.stdout}\nstderr: {proc.stderr}"
+    )
+    # The check asserts its own bounds (and exits 1 on any failure, printing each one to
+    # stderr); its summary line must agree with the exit code asserted above.
+    assert re.search(r"entities_jitter_check: \d+ passed, 0 failed", proc.stderr), (
+        f"{CHECK.name} summary line missing or reports failures\nstderr: {proc.stderr}"
     )
     try:
         return json.loads(proc.stdout)
@@ -89,6 +95,15 @@ def test_every_model_vertex_individually_holds_the_bound(data):
     assert len(per_vertex) == data["vertexCount"] > 0
     for i, err in enumerate(per_vertex):
         assert err < CENTIMETRE_BOUND_M, f"vertex {i}: error {err:.6g} m exceeds the centimetre bound"
+
+
+def test_bound_matches_the_check_and_attitude_is_non_identity(data):
+    """The bound this driver restates is the one the check itself asserts, and the
+    attitude applied to the model is a real rotation (|w| < 1), as the module docstring
+    of the check claims.
+    """
+    assert data["centimetreBoundM"] == CENTIMETRE_BOUND_M
+    assert abs(data["attitudeW"]) < 1 - 1e-9
 
 
 def test_entities_jitter_report(data, capsys):
