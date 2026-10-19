@@ -352,8 +352,9 @@ def _run_docker_image_lifecycle_pull_by_digest_run_bind_and_remove():
         _docker("build", "-f", "services/lockstep-ref/Dockerfile", "-t", local_tag, ".")
 
         # 2. A throwaway, loopback-only local registry (question 118's own "no real/external
-        #    registry" rule) -- removed in the `finally` block below.
-        registry_id = _docker("run", "-d", "-p", "127.0.0.1::5000", "registry:2")
+        #    registry" rule) -- removed in the `finally` block below. Question 254 defect D2:
+        #    `--pull never`, since `registry:2` is a floating tag: absent must fail, not pull.
+        registry_id = _docker("run", "-d", "--pull", "never", "-p", "127.0.0.1::5000", "registry:2")
         registry_port_line = _docker("port", registry_id, "5000")
         registry_port = int(registry_port_line.splitlines()[0].rsplit(":", 1)[-1])
 

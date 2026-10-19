@@ -192,7 +192,9 @@ pub fn push_cfs_image_to_local_registry(run_id: &str) -> (String, String, (Docke
     // worked around.
     wait_for_fixed_registry_port_free().unwrap_or_else(|e| panic!("{e}"));
     let port_mapping = format!("127.0.0.1:{FIXED_REGISTRY_PORT}:5000");
-    let mut registry_args = vec!["run", "-d", "-p", port_mapping.as_str()];
+    // Question 254 defect D2: `registry:2` is a floating tag, so `--pull never` -- an absent image is
+    // a visible `docker run` failure here, never an implicit pull from Docker Hub.
+    let mut registry_args = vec!["run", "-d", "--pull", "never", "-p", port_mapping.as_str()];
     registry_args.extend(label_refs.iter().copied());
     registry_args.push("registry:2");
     let output = Command::new("docker").args(&registry_args).current_dir(repo_root()).output().unwrap_or_else(|e| panic!("could not launch `docker {registry_args:?}`: {e}"));

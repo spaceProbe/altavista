@@ -216,7 +216,8 @@ def _fetch_json_via_container_network(run_id: str, target_container: str, script
     probe_name = f"av-live-evidence-probe-{run_id}-{abs(hash(script)) % 100000}"
     try:
         raw = _docker(
-            "run", "--rm", "--name", probe_name, "--network", f"container:{target_container}",
+            # Question 254 defect D2: `--pull never` -- PROBE_IMAGE is a floating tag; absent must fail, not pull.
+            "run", "--rm", "--pull", "never", "--name", probe_name, "--network", f"container:{target_container}",
             *_label_args(run_id), PROBE_IMAGE, "python3", "-c", script,
         )
     finally:

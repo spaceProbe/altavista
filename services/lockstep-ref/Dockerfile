@@ -22,7 +22,13 @@
 # SIGNAL-in/SIGNAL-out integrator with no GMAT dependency at all, see server.py's own module
 # doc comment -- has no business needing inside a minimal container image. A one-line namespace
 # stand-in is written instead so `altavista.pb.altavista.v1.*` still imports cleanly.
-FROM python:3.13-slim
+# Base pinned by content digest, never the floating tag (question 254 defect D2): this line was
+# `FROM python:3.13-slim`, and when k3s's image GC deleted the host's `python:3.13-slim`
+# (2026-10-18 23:56:48 CDT) the next `docker build` found the base absent and PULLED the tag from
+# Docker Hub at 23:57:56 CDT, getting the digest below -- which is what every `python:3.13-slim`
+# user on this host has run against since. Recorded here so the base never floats again: an absent
+# base can now only ever be this exact content, never whatever the tag has moved to.
+FROM python:3.13-slim@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f
 
 WORKDIR /app
 

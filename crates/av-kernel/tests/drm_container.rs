@@ -854,7 +854,8 @@ fn docker_image_lifecycle_through_execute_pulls_by_digest_runs_binds_and_removes
     docker_cmd(&build_args);
     let _local_image_guard = DockerImageGuard::new(local_tag, &ids_before);
 
-    let mut registry_args = vec!["run", "-d", "-p", "127.0.0.1::5000"];
+    // Question 254 defect D2: `--pull never` -- `registry:2` is a floating tag; absent must fail, not pull.
+    let mut registry_args = vec!["run", "-d", "--pull", "never", "-p", "127.0.0.1::5000"];
     registry_args.extend(label_refs.iter().copied());
     registry_args.push("registry:2");
     let registry_id = docker_cmd(&registry_args);

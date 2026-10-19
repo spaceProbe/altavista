@@ -198,7 +198,8 @@ fn docker_image_lifecycle_pull_by_digest_run_bind_reset_shutdown_stop_remove() {
     // 2. A throwaway, loopback-only local registry -- question 118's own "no real/external
     //    registry" rule; this container (and everything pushed to it) is removed at the end of
     //    this test, never left running. Labeled for the same reason as the image above.
-    let mut registry_args = vec!["run", "-d", "-p", "127.0.0.1::5000"];
+    // Question 254 defect D2: `--pull never` -- `registry:2` is a floating tag; absent must fail, not pull.
+    let mut registry_args = vec!["run", "-d", "--pull", "never", "-p", "127.0.0.1::5000"];
     registry_args.extend(label_refs.iter().copied());
     registry_args.push("registry:2");
     let registry_id = docker(&registry_args);
@@ -325,7 +326,8 @@ fn prune_stale_test_resources_removes_orphaned_labeled_containers_and_images() {
     let labels = test_label_args(&run_id);
     let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
 
-    let mut run_args = vec!["run", "-d", "-p", "127.0.0.1::5000"];
+    // Question 254 defect D2: `--pull never`, as for the registry above.
+    let mut run_args = vec!["run", "-d", "--pull", "never", "-p", "127.0.0.1::5000"];
     run_args.extend(label_refs.iter().copied());
     run_args.push("registry:2");
     let registry_id = docker(&run_args);
