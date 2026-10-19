@@ -7,7 +7,8 @@
 //! - The study-mode rerun test runs `drms/leo_orbital_native_sweep.*` (12 pure-Rust samples), once
 //!   and again into the same `--store-dir`: with the same `--out-dir` the record is byte-identical,
 //!   with another `--out-dir` it differs (every sample's `products_uri` is the canonical path of its
-//!   sample directory), which is exactly the case that used to silently overwrite the store.
+//!   sample directory), which is exactly the case that used to silently overwrite the store. Since
+//!   question 254 item 2 the second case is refused before the first sample runs.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -126,11 +127,15 @@ fn rerunning_a_study_into_one_store_is_ok_with_the_same_out_dir_and_refused_with
     assert!(again.status.success(), "the same out-dir reproduces the same study: {}", String::from_utf8_lossy(&again.stderr));
     assert_eq!(study_bytes(&store, id), stored);
 
-    // Another --out-dir changes every sample's products_uri: different content, refused.
+    // Another --out-dir changes every sample's products_uri: a study the stored one cannot be
+    // reproduced by. Since question 254 item 2 that is refused up front, before the first sample
+    // runs: no sample directory and no sweep_results.pb in the new --out-dir.
     let elsewhere = run_native_study(&out_b, &store);
+    assert_eq!(tree(&out_b).into_keys().collect::<Vec<_>>(), Vec::<String>::new(), "--out-dir exists and is empty: no sample ran, no sweep_results.pb was written");
     assert_clean_refusal(&elsewhere, id);
+    let stderr = String::from_utf8_lossy(&elsewhere.stderr);
+    assert!(stderr.contains("refuses this study up front") && stderr.contains("no sample was run") && stderr.contains("samples[p0_d0].products_uri"), "{stderr}");
     assert_eq!(study_bytes(&store, id), stored, "the stored study is unchanged, byte for byte");
-    assert!(out_b.join("sweep_results.pb").is_file(), "the study itself finished and is in its --out-dir");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -9,14 +9,24 @@
 //!   mode (`tests/test_clickhouse_sweep_panel.py` is that path end to end).
 //! - `--import-study <sweep_results.pb>` decodes a finished `SweepResults` and writes it into every
 //!   selected store; it is how an existing study (a `sweep_results.pb` from an earlier run, a
-//!   frozen fixture) enters a store without re-running GMAT.
+//!   frozen fixture) enters a store without re-running GMAT. It is also **the repair** for the two
+//!   outcomes of study mode's two-phase write in which the stores may disagree
+//!   (`av_sweep::study_write`): identical content is idempotent in each store, so running it with
+//!   the same store options converges.
 //!
 //! The study id (`--read-study`'s argument, or the `sweep_id` inside a decoded `--import-study`
 //! file) is untrusted input. With `--store-dir` it becomes a directory name, so the file store
 //! refuses anything that is not a path component (`..`, `a/b`, an absolute path, NUL, ...; the
 //! rule is `av_cdm::path_id`) as `StoreError::InvalidSweepId`, before any path is built; this mode
-//! reports it and writes nothing. When both stores are selected for an import, the file store is
-//! tried first, so a refused id never reaches ClickHouse either. ClickHouse alone takes any id.
+//! reports it and writes nothing. ClickHouse alone takes any id.
+//!
+//! **`--import-study` with several stores** (question 254 item 2) opens every selected store,
+//! has each check the study up front (`check_plan` of the study's exact plan: a store holding a
+//! different study, an invalid id and a case-fold collision are refused before any store is
+//! written), then writes them in `study_write::write_study`'s two phases: prepare ClickHouse then
+//! the file store (nothing visible), abort everything if either refuses or fails, then commit
+//! ClickHouse before the file store. The file store is therefore no longer tried first; its
+//! refusals arrive at the plan check, which runs before ClickHouse is touched.
 //!
 //! The ClickHouse password is read from the environment variable the flags name; nothing here
 //! prints it, and the errors printed come from `StoreError`, which never carries it.
@@ -26,7 +36,9 @@ use std::path::Path;
 use av_cdm::pb;
 use av_sweep::clickhouse::ClickHouseConfig;
 use av_sweep::json;
-use av_sweep::store::{open_store, StoreBackend};
+use av_sweep::plan::StudyPlan;
+use av_sweep::store::{open_store, StoreBackend, StoreKind};
+use av_sweep::study_write::{self, NamedStore, StudyWriteError, Written};
 use prost::Message;
 
 use crate::cli::{StoreArgs, StoreOp};
@@ -41,6 +53,55 @@ pub fn selected_backends(store_dir: &Option<std::path::PathBuf>, clickhouse: &Op
         out.push((format!("the ClickHouse study store at {} (database {})", config.url, config.database), StoreBackend::ClickHouse(config.clone())));
     }
     out
+}
+
+/// Opens every selected store (connecting to and verifying ClickHouse), failing with the store
+/// named. The order does not matter: `study_write` commits in its own order.
+pub fn open_selected_stores(store_dir: &Option<std::path::PathBuf>, clickhouse: &Option<ClickHouseConfig>) -> Result<Vec<NamedStore>, String> {
+    selected_backends(store_dir, clickhouse)
+        .into_iter()
+        .map(|(label, backend)| open_store(backend).map(|store| NamedStore { label: label.clone(), store }).map_err(|e| format!("opening {label}: {e}")))
+        .collect()
+}
+
+/// The store flags that select exactly these stores, for the repair command a message prints
+/// (never the password, which is only ever named by its environment variable).
+pub fn store_flags(store_dir: &Option<std::path::PathBuf>, clickhouse: &Option<ClickHouseConfig>) -> String {
+    let mut flags = Vec::new();
+    if let Some(root) = store_dir {
+        flags.push(format!("--store-dir {}", root.display()));
+    }
+    if let Some(c) = clickhouse {
+        flags.push(format!("--store-clickhouse {} --clickhouse-database {} --clickhouse-user {}", c.url, c.database, c.user));
+        if let Some(var) = &c.password_env {
+            flags.push(format!("--clickhouse-password-env {var}"));
+        }
+        if let Some(ca) = &c.ca_file {
+            flags.push(format!("--clickhouse-ca-file {}", ca.display()));
+        }
+    }
+    flags.join(" ")
+}
+
+/// The message for a failed two-phase write. When the stores may now disagree it ends with the
+/// concrete repair command for `pb_path`, the `sweep_results.pb` that holds the study.
+pub fn describe_write_error(e: &StudyWriteError, pb_path: &Path, store_dir: &Option<std::path::PathBuf>, clickhouse: &Option<ClickHouseConfig>) -> String {
+    let mut message = format!("writing study: {e}");
+    if e.needs_repair() {
+        message.push_str(&format!("\nthe study is in {}; to bring the stores back in line run: av-sweep --import-study {} {}", pb_path.display(), pb_path.display(), store_flags(store_dir, clickhouse)));
+    }
+    message
+}
+
+/// What a successful write prints: where each store holds the study.
+pub fn report_written(written: &[Written], sweep_id: &str) {
+    for w in written {
+        match (w.kind, w.newly_written) {
+            (StoreKind::File, true) => eprintln!("av-sweep: study store written to {}", w.location),
+            (StoreKind::ClickHouse, true) => eprintln!("av-sweep: study written to {}", w.location),
+            (_, false) => eprintln!("av-sweep: study {sweep_id:?} already held, identical, at {}", w.location),
+        }
+    }
 }
 
 fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -68,11 +129,13 @@ pub fn run_store(args: StoreArgs) -> Result<(), String> {
         StoreOp::ImportStudy { pb } => {
             let bytes = std::fs::read(&pb).map_err(|e| format!("reading {}: {e}", pb.display()))?;
             let results = pb::SweepResults::decode(bytes.as_slice()).map_err(|e| format!("{}: does not decode as altavista.v1.SweepResults: {e}", pb.display()))?;
-            for (label, backend) in backends {
-                let mut store = open_store(backend).map_err(|e| format!("opening {label}: {e}"))?;
-                let location = store.put_study(&results).map_err(|e| format!("writing study {:?} to {label}: {e}", results.sweep_id))?;
-                eprintln!("av-sweep: study {:?} written to {location}", results.sweep_id);
-            }
+            // Question 254 item 2: every store is opened and asked first (so a store that cannot
+            // take the study, or an invalid id, is refused before any store is written), then the
+            // stores are written in two phases: never one store without the other.
+            let mut stores = open_selected_stores(&args.store_dir, &args.clickhouse)?;
+            study_write::check_plan(&stores, &StudyPlan::exact(&results)).map_err(|e| e.to_string())?;
+            let written = study_write::write_study(&mut stores, &results).map_err(|e| describe_write_error(&e, &pb, &args.store_dir, &args.clickhouse))?;
+            report_written(&written, &results.sweep_id);
             Ok(())
         }
     }

@@ -13,6 +13,8 @@
 //!    mismatches, and real server exception codes.
 //! 2. [`a_read_only_user_can_read_but_every_write_is_a_typed_refusal`]: real read-only users.
 //! 3. [`tls_to_the_real_server_verifies_the_certificate_and_the_host`]: `https://` with a test CA.
+//! 4. [`the_plan_check_and_the_two_phase_write_hold_against_the_real_server`]: the up-front plan
+//!    check, `prepare`/`abort`/`commit` invisibility, and `write_study` with the file store.
 //!
 //! The real-sweep equality proof (a GMAT study written through both stores in one run) is
 //! `tests/clickhouse_real_sweep.rs`.
@@ -661,6 +663,83 @@ const TLS_XML: &str = r#"<clickhouse>
   </openSSL>
 </clickhouse>
 "#;
+
+// ---------------------------------------------------------------------------------------------
+// 4. The up-front check and the two-phase write (question 254 item 2) against the real server.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn the_plan_check_and_the_two_phase_write_hold_against_the_real_server() {
+    use av_sweep::plan::StudyPlan;
+    use av_sweep::store::FileStudyStore;
+    use av_sweep::study_write::{check_plan, write_study, NamedStore, StudyWriteError};
+
+    const NAME: &str = "the_plan_check_and_the_two_phase_write_hold_against_the_real_server";
+    gate_or_skip!(NAME);
+    let _lock = lock_docker_tests();
+    prune_stale_test_resources(&_lock);
+    let server = ChServer::start(NAME, StartOpts::default());
+    let config = server.config();
+    let mut store = ClickHouseStudyStore::connect(&config).expect("connect + migrate");
+
+    step("check_plan: a missing study and an identical one are accepted, a different one is refused naming the first differing field");
+    let held = plain_study("planned", 1.0);
+    assert!(store.check_plan(&StudyPlan::exact(&held)).is_ok(), "no study under the id: accepted");
+    store.put_study(&held).unwrap();
+    assert!(store.check_plan(&StudyPlan::exact(&held)).is_ok(), "the identical study: accepted");
+    let mut other = held.clone();
+    other.samples[0].run_id = "another-run".to_string();
+    let rows = count(store.client(), "SELECT count() FROM `av_sweep_samples`");
+    match store.check_plan(&StudyPlan::exact(&other)).unwrap_err() {
+        StoreError::RefusedWrite { sweep_id, reason: WriteRefusal::DifferentPlan { difference, existing_sha256, .. } } => {
+            assert_eq!(sweep_id, "planned");
+            let field = &difference.field;
+            assert!(field.starts_with("samples[p") && field.ends_with("].run_id"), "{field}");
+            assert_eq!(existing_sha256, av_sweep::clickhouse::content_sha256(&held));
+        }
+        other => panic!("expected RefusedWrite/DifferentPlan, got {other:?}"),
+    }
+    assert_eq!(count(store.client(), "SELECT count() FROM `av_sweep_samples`"), rows, "a check writes nothing");
+
+    step("prepare: rows are inserted but no reader sees the study; abort leaves it unseen; prepare + commit publishes it");
+    let staged = plain_study("staged", 2.0);
+    let prepared = store.prepare(&staged).unwrap();
+    assert_eq!(store.get_study("staged").unwrap(), None, "prepared, not committed: invisible");
+    assert!(count(store.client(), "SELECT count() FROM `av_sweep_samples` WHERE sweep_id = 'staged'") > 0, "the rows are in the table");
+    assert!(!store.list_studies().unwrap().iter().any(|s| s.sweep_id == "staged"));
+    store.abort(prepared).unwrap();
+    assert_eq!(store.get_study("staged").unwrap(), None);
+    let prepared = store.prepare(&staged).unwrap();
+    store.commit(prepared).unwrap();
+    assert_identical(&store.get_study("staged").unwrap().unwrap(), &staged, "prepare + commit");
+
+    step("write_study: the file store refuses at prepare, so ClickHouse's staged rows stay invisible; a fresh id lands in both");
+    let root = std::env::temp_dir().join(format!("av-sweep-real-two-phase-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let stores = |root: &std::path::Path| -> Vec<NamedStore> {
+        vec![
+            NamedStore { label: "the file store".to_string(), store: Box::new(FileStudyStore::new(root)) },
+            NamedStore { label: "the ClickHouse store".to_string(), store: Box::new(ClickHouseStudyStore::connect(&config).unwrap()) },
+        ]
+    };
+    let fresh = plain_study("both", 3.0);
+    FileStudyStore::new(&root).put_study(&plain_study("both", 99.0)).unwrap(); // the file store holds a different "both"
+    let err = write_study(&mut stores(&root), &fresh).unwrap_err();
+    assert!(matches!(&err, StudyWriteError::PrepareFailed { store, .. } if store == "the file store"), "{err:?}");
+    assert_eq!(store.get_study("both").unwrap(), None, "ClickHouse shows no study");
+    assert!(fs::read_dir(&root).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().starts_with(".incoming-")), "no file stage left");
+    let err = check_plan(&stores(&root), &StudyPlan::exact(&fresh)).unwrap_err();
+    assert!(matches!(&err, StudyWriteError::PlanRefused { store, .. } if store == "the file store"), "{err:?}");
+
+    let both = plain_study("both-fresh", 4.0);
+    let written = write_study(&mut stores(&root), &both).unwrap();
+    assert_eq!(written.iter().map(|w| w.newly_written).collect::<Vec<_>>(), [true, true]);
+    assert_identical(&store.get_study("both-fresh").unwrap().unwrap(), &both, "ClickHouse");
+    assert_eq!(FileStudyStore::new(&root).get_study("both-fresh").unwrap().unwrap(), both, "the file store");
+    let again = write_study(&mut stores(&root), &both).unwrap();
+    assert_eq!(again.iter().map(|w| w.newly_written).collect::<Vec<_>>(), [false, false], "an identical rerun writes nothing");
+    let _ = fs::remove_dir_all(&root);
+}
 
 #[test]
 fn tls_to_the_real_server_verifies_the_certificate_and_the_host() {

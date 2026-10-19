@@ -110,8 +110,15 @@ into it.
   differs from the declared count exactly when a sample failed.
 - **The store is a trait from day one.** `FileStudyStore` writes `<root>/<sweep_id>/` with
   the `SweepResults` message, its canonical JSON, and a JSONL of samples; the ClickHouse
-  backend is a typed refusal naming the deferral, not a stub that pretends to work. The
-  `--out-dir` tree stays the sample workspace; `--store-dir` is the platform's read path.
+  backend (question 245, `--store-clickhouse`) is the second implementation of the same trait.
+  The `--out-dir` tree stays the sample workspace; `--store-dir` is the platform's read path.
+  Studies are immutable in both stores. With both configured, study mode has every store
+  check the study before its first sample runs (a store holding a different study refuses
+  then, writing nothing), and writes them in two phases (prepare both, commit ClickHouse then
+  the file store) so a refusal or failure in one never leaves them holding different studies
+  (question 254 item 2; `crates/av-sweep/src/study_write.rs` has the table of every outcome,
+  and `av-sweep --import-study <out-dir>/sweep_results.pb` with the same store options is the
+  repair for the two outcomes where they can still disagree).
 
 ### The fixture study, measured
 

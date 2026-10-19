@@ -271,7 +271,7 @@ pub fn run_jobs(
                 }
                 let Some(cfg) = queue.lock().ok().and_then(|mut q| q.pop_front()) else { return };
                 let sample_dir = out_dir.join(format!("sample_p{}_d{}", cfg.point_index, cfg.draw_index));
-                let run_id = format!("{sweep_id}_p{}_d{}", cfg.point_index, cfg.draw_index);
+                let run_id = crate::study::sample_run_id(sweep_id, cfg.point_index, cfg.draw_index);
                 let paths = match write_sample_inputs(&sample_dir, &cfg) {
                     Ok(p) => p,
                     Err(e) => {

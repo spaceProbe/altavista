@@ -47,6 +47,16 @@
 //! to `<root>/<sweep_id>/`. `rename(2)` of a directory onto a non-empty directory fails, so it can
 //! never replace a study.
 //!
+//! **Two phases (question 254 item 2).** `put_study` is [`StudyStore::prepare`] then
+//! [`StudyStore::commit`] on this one store: `prepare` is everything up to and including the
+//! `fsync`ed staging directory (invisible to every reader), `commit` is the rename, `abort`
+//! removes the stage. Writing a study to several stores at once goes through
+//! [`crate::study_write`], which prepares every store, aborts all if any refuses, and only then
+//! commits; its module doc has the order (ClickHouse before the file store) and the table of every
+//! partial-failure outcome. [`StudyStore::check_plan`] is the up-front question "would you accept
+//! the study about to run?" ([`crate::plan`]); both backends answer it from the study they hold,
+//! and the file store also applies the id rules below to it.
+//!
 //! - **A `sweep_id` is a path component, validated before any path is built** (question 254 item
 //!   1). The id comes from a sweep YAML's `id`, a decoded `sweep_results.pb` (`--import-study`) or
 //!   `--read-study <id>`: untrusted input. [`av_cdm::path_id::validate_path_component_id`] accepts
@@ -72,7 +82,8 @@
 //!   [`StoreError::Decode`], never overwritten: the operator decides what to do with it.
 //! - **A directory under the id that holds no `sweep_results.pb` but is not empty** (a torn
 //!   directory from the pre-question-252 writer, or a foreign one) is an [`StoreError::Io`]
-//!   naming it, not silently written into.
+//!   naming it, not silently written into. It is refused by `check_plan` and `prepare` (question
+//!   254 item 2), before a stage is built and, with several stores, before any store commits.
 //! - **Healing.** An identical re-put of a study whose `sweep_results.json` or `samples.jsonl`
 //!   is *missing* (the old writer wrote `sweep_results.pb` first and could be killed before the
 //!   others) writes only the missing file. Files that exist are never rewritten.
@@ -113,6 +124,7 @@ use prost::Message;
 
 use crate::clickhouse::content_sha256;
 use crate::json;
+use crate::plan::{PlanDifference, StudyPlan};
 
 /// Name prefix of the staging directories `put_study` builds a study in before renaming it into
 /// place. It begins with a dot, which no valid `sweep_id` can, so a staging directory can never be
@@ -200,6 +212,14 @@ pub enum StoreError {
     /// data (`SweepError::MixedPassCriterion`).
     #[error("aggregation: {0}")]
     Aggregation(#[from] crate::error::SweepError),
+
+    /// ClickHouse's header insert (the commit point of a write, decision 1 of the `clickhouse`
+    /// module doc) did not succeed *and* the read that would have shown whether it landed also failed (or
+    /// the insert was acknowledged but the read-back failed): study `sweep_id` under write
+    /// `write_id` may or may not be committed. `insert` says how the insert ended, `reread` why the
+    /// check failed. Re-running the same write converges (an identical study is idempotent).
+    #[error("ClickHouse at {endpoint}: whether study {sweep_id:?} (write {write_id}) was committed is unknown: the header insert {insert}; reading the study back then failed: {reread}")]
+    CommitOutcomeUnknown { endpoint: String, sweep_id: String, write_id: String, insert: String, reread: String },
 }
 
 /// Why [`StoreError::RefusedWrite`] was returned.
@@ -210,6 +230,12 @@ pub enum WriteRefusal {
     /// file store's study directory (it has no write ids); `existing_sha256` and `new_sha256` are
     /// [`crate::clickhouse::content_sha256`] of each, the same identity in both backends.
     DifferentContent { existing_write_id: String, existing_sha256: String, new_sha256: String },
+    /// A study with this `sweep_id` already exists and the study about to run cannot reproduce it
+    /// (question 254 item 2; returned by [`StudyStore::check_plan`], before the first sample runs):
+    /// `difference` is the first field of the [`StudyPlan`] that differs with its two values
+    /// (boxed, so a [`StoreError`] stays small). `existing_write_id` and `existing_sha256` name
+    /// the existing copy as in [`WriteRefusal::DifferentContent`].
+    DifferentPlan { existing_write_id: String, existing_sha256: String, difference: Box<PlanDifference> },
     /// The server refused one of the inserts (a read-only user, missing privileges, a full disk).
     Server { code: Option<i64>, name: Option<String>, http_status: u16, message: String },
 }
@@ -220,6 +246,11 @@ impl std::fmt::Display for WriteRefusal {
             WriteRefusal::DifferentContent { existing_write_id, existing_sha256, new_sha256 } => write!(
                 f,
                 "a study with this id already exists (existing copy {existing_write_id}, content sha256 {existing_sha256}) and the new content (sha256 {new_sha256}) differs; studies are immutable"
+            ),
+            WriteRefusal::DifferentPlan { existing_write_id, existing_sha256, difference } => write!(
+                f,
+                "a study with this id already exists (existing copy {existing_write_id}, content sha256 {existing_sha256}) and the study about to run would not reproduce it: {} is {} there and {} in this run; studies are immutable",
+                difference.field, difference.existing, difference.planned
             ),
             WriteRefusal::Server { code, name, http_status, message } => {
                 write!(f, "the server refused the insert (HTTP {http_status}")?;
@@ -249,22 +280,124 @@ pub struct StudySummary {
     pub sample_count: usize,
 }
 
+/// The kind of a [`StudyStore`]. The order is the commit order of
+/// [`crate::study_write::write_study`]: the network store first, because it is the one that fails
+/// in practice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StoreKind {
+    ClickHouse,
+    File,
+}
+
+/// What [`StudyStore::prepare`] decided.
+pub enum PreparedState {
+    /// The store already holds an identical study at `location`: nothing was staged and committing
+    /// it writes nothing.
+    Existing { location: String },
+    /// A backend-private token for the staged write (a staging directory, a write id): only the
+    /// backend that made it can use it.
+    Staged(Box<dyn std::any::Any + Send>),
+}
+
+/// A write staged by [`StudyStore::prepare`], to be passed to [`StudyStore::commit`] or
+/// [`StudyStore::abort`] on the store that made it. Dropping it commits nothing (a staged file
+/// store directory is left for an operator, as after a crash; use `abort`).
+pub struct PreparedWrite {
+    pub sweep_id: String,
+    pub state: PreparedState,
+}
+
+impl PreparedWrite {
+    pub fn existing(sweep_id: impl Into<String>, location: impl Into<String>) -> Self {
+        Self { sweep_id: sweep_id.into(), state: PreparedState::Existing { location: location.into() } }
+    }
+
+    pub fn staged<T: std::any::Any + Send>(sweep_id: impl Into<String>, token: T) -> Self {
+        Self { sweep_id: sweep_id.into(), state: PreparedState::Staged(Box::new(token)) }
+    }
+
+    /// The token of a staged write, or the write itself back when it is not staged (or its token
+    /// is another backend's).
+    pub fn into_token<T: std::any::Any>(self) -> Result<T, PreparedWrite> {
+        let Self { sweep_id, state } = self;
+        match state {
+            PreparedState::Staged(token) => match token.downcast::<T>() {
+                Ok(token) => Ok(*token),
+                Err(token) => Err(Self { sweep_id, state: PreparedState::Staged(token) }),
+            },
+            existing => Err(Self { sweep_id, state: existing }),
+        }
+    }
+}
+
+impl std::fmt::Debug for PreparedWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.state {
+            PreparedState::Existing { location } => write!(f, "PreparedWrite({:?}: existing at {location})", self.sweep_id),
+            PreparedState::Staged(_) => write!(f, "PreparedWrite({:?}: staged)", self.sweep_id),
+        }
+    }
+}
+
+/// The refusal for a plan that cannot reproduce `existing` (stored at `existing_write_id`); the
+/// backends share it so the message is the same.
+pub(crate) fn plan_refusal(plan: &StudyPlan, existing_write_id: String, existing: &pb::SweepResults, difference: PlanDifference) -> StoreError {
+    StoreError::RefusedWrite {
+        sweep_id: plan.sweep_id.clone(),
+        reason: WriteRefusal::DifferentPlan { existing_write_id, existing_sha256: content_sha256(existing), difference: Box::new(difference) },
+    }
+}
+
 /// The seam every study-store backend implements -- see this module's own doc comment for why
 /// this exists at all (ClickHouse later, file-backed now, no caller-visible difference). Object
 /// -safe deliberately (`&mut self`/`&self`, no generics), so [`open_store`] can return `Box<dyn
 /// StudyStore>` and a caller need not know at compile time which backend it holds.
 pub trait StudyStore {
+    /// Which backend this is; [`crate::study_write::write_study`] commits the network store
+    /// before the local one.
+    fn kind(&self) -> StoreKind;
+
+    /// Would this store accept the study `plan` describes, judged before its first sample runs
+    /// (question 254 item 2)? `Ok` when it holds no study under the id, or holds one the plan can
+    /// reproduce ([`StudyPlan::first_difference`] is `None`); otherwise a typed
+    /// [`StoreError::RefusedWrite`] with [`WriteRefusal::DifferentPlan`], or the id refusals of
+    /// the backend ([`StoreError::InvalidSweepId`], [`StoreError::SweepIdCollision`]). Writes
+    /// nothing. An `Ok` is provisional: [`StudyStore::prepare`] checks the final content.
+    fn check_plan(&self, plan: &StudyPlan) -> Result<(), StoreError>;
+
+    /// Phase 1 of a two-phase write: re-checks the final content and stages it, **making nothing
+    /// visible to a reader**. An identical study already stored is not staged
+    /// ([`PreparedState::Existing`]); a different one is [`WriteRefusal::DifferentContent`]; the id
+    /// refusals are as in [`StudyStore::check_plan`]. What staging is, per backend, is in
+    /// [`FileStudyStore`]'s and `ClickHouseStudyStore`'s docs.
+    fn prepare(&mut self, results: &pb::SweepResults) -> Result<PreparedWrite, StoreError>;
+
+    /// Phase 2: makes a prepared write visible and returns its location. For a staged write this
+    /// is the commit point of the backend; it can lose a race (a different study published first:
+    /// [`WriteRefusal::DifferentContent`]) or fail. For [`PreparedState::Existing`] it does
+    /// nothing and returns the existing copy's location.
+    fn commit(&mut self, prepared: PreparedWrite) -> Result<String, StoreError>;
+
+    /// Discards a prepared write that will not be committed. Never makes anything visible; `Err`
+    /// says something staged could not be removed (a stray staging directory), not that anything
+    /// is wrong with the stored studies.
+    fn abort(&mut self, prepared: PreparedWrite) -> Result<(), StoreError>;
+
     /// Writes `results` to this store, returning the location it wrote to (a path for
-    /// [`FileStudyStore`]; a connection-qualified location string for a future ClickHouse-backed
-    /// store) -- a plain `String` rather than a backend-specific type, since the only thing a
-    /// caller does with it today is log/display it (`src/bin/av-sweep/study.rs`'s own
-    /// `--store-dir` wiring).
+    /// [`FileStudyStore`]; a connection-qualified location string for the ClickHouse store) -- a
+    /// plain `String` rather than a backend-specific type, since the only thing a caller does with
+    /// it is log/display it.
     ///
     /// Studies are immutable (question 252, both backends): a `sweep_id` that already holds a
     /// study with identical content is an idempotent `Ok` (the existing copy's location, nothing
     /// rewritten); with different content it is [`StoreError::RefusedWrite`] and the stored study
-    /// is untouched.
-    fn put_study(&mut self, results: &pb::SweepResults) -> Result<String, StoreError>;
+    /// is untouched. This is [`StudyStore::prepare`] then [`StudyStore::commit`] on this one store;
+    /// a caller writing to several stores uses [`crate::study_write::write_study`] instead, so the
+    /// stores cannot be left disagreeing by one store's refusal.
+    fn put_study(&mut self, results: &pb::SweepResults) -> Result<String, StoreError> {
+        let prepared = self.prepare(results)?;
+        self.commit(prepared)
+    }
 
     /// Reads back the study named `sweep_id`, or `Ok(None)` if this store holds no such study --
     /// "not found" is not itself an error condition here (a caller asking about a study that
@@ -337,6 +470,26 @@ impl FileStudyStore {
             return Err(StoreError::SweepIdCollision { sweep_id: sweep_id.to_string(), existing: results.sweep_id, dir: dir.to_path_buf() });
         }
         Ok(Some(results))
+    }
+
+    /// Refuses a `dir` (which holds no study, see [`Self::read_study`]) that the rename publishing a
+    /// study there would fail on: a directory that is not empty (a torn directory from the
+    /// pre-question-252 writer, or a foreign one), or an entry that is not a directory. It is a
+    /// typed [`StoreError::Io`] naming `dir`, returned by `check_plan` and `prepare` so that, with
+    /// several stores, the refusal arrives while nothing anywhere is committed (question 254 item
+    /// 2) instead of as a failed rename after ClickHouse committed. An absent or empty directory is
+    /// fine (renaming onto an empty directory replaces it). A target that appears or changes
+    /// between `prepare` and `commit`, or a rename that fails for permissions or disk, is still
+    /// only discovered by the rename: `study_write`'s `PartialCommit` row.
+    fn refuse_occupied_target(&self, dir: &Path) -> Result<(), StoreError> {
+        match fs::read_dir(dir) {
+            Ok(mut entries) => match entries.next() {
+                None => Ok(()),
+                Some(_) => Err(io_err(dir, std::io::Error::new(std::io::ErrorKind::DirectoryNotEmpty, "a directory that holds no sweep_results.pb is already here and is not empty; a study is never published over it"))),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(io_err(dir, e)),
+        }
     }
 
     /// What `put_study` answers when its rename failed: either another writer published this id
@@ -415,16 +568,49 @@ fn settle_existing(dir: &Path, existing: &pb::SweepResults, new: &pb::SweepResul
     Ok(dir.display().to_string())
 }
 
+/// The private token of a study staged by [`FileStudyStore`]'s `prepare`: the fsynced staging
+/// directory and what the rename that publishes it needs.
+struct FileStage {
+    stage: PathBuf,
+    dir: PathBuf,
+    parent: PathBuf,
+    results: pb::SweepResults,
+}
+
 impl StudyStore for FileStudyStore {
-    fn put_study(&mut self, results: &pb::SweepResults) -> Result<String, StoreError> {
+    fn kind(&self) -> StoreKind {
+        StoreKind::File
+    }
+
+    fn check_plan(&self, plan: &StudyPlan) -> Result<(), StoreError> {
+        let dir = self.study_dir(&plan.sweep_id)?;
+        self.reject_case_variant(&plan.sweep_id)?;
+        match self.read_study(&dir, &plan.sweep_id)? {
+            None => self.refuse_occupied_target(&dir),
+            Some(existing) => match plan.first_difference(&existing) {
+                None => Ok(()),
+                Some(difference) => Err(plan_refusal(plan, dir.display().to_string(), &existing, difference)),
+            },
+        }
+    }
+
+    /// Stages the study: the three files are written and `fsync`ed into `<root>/.incoming-*/`
+    /// (module doc, "How `put_study` writes"), which no reader lists or opens. Nothing is visible
+    /// until [`StudyStore::commit`] renames it. An identical study already stored is
+    /// [`PreparedState::Existing`] (after the "Healing" of a missing derived file, which restores
+    /// a file the stored study should have and changes no content).
+    fn prepare(&mut self, results: &pb::SweepResults) -> Result<PreparedWrite, StoreError> {
         let dir = self.study_dir(&results.sweep_id)?;
         self.reject_case_variant(&results.sweep_id)?;
         if let Some(existing) = self.read_study(&dir, &results.sweep_id)? {
-            return settle_existing(&dir, &existing, results);
+            return settle_existing(&dir, &existing, results).map(|location| PreparedWrite::existing(&results.sweep_id, location));
         }
 
-        // No study under this id: build it whole in a staging directory, then publish it with one
-        // rename (module doc, "How put_study writes").
+        // No study under this id. Refuse now, while nothing anywhere is committed, a target the
+        // rename in `commit` would fail on.
+        self.refuse_occupied_target(&dir)?;
+
+        // Build it whole in a staging directory, to be published with one rename by `commit`.
         let parent = dir.parent().unwrap_or(&self.root).to_path_buf();
         fs::create_dir_all(&parent).map_err(|e| io_err(&parent, e))?;
         let stage = staging_dir(&self.root);
@@ -434,6 +620,19 @@ impl StudyStore for FileStudyStore {
             let _ = fs::remove_dir_all(&stage);
             return Err(e);
         }
+        Ok(PreparedWrite::staged(&results.sweep_id, FileStage { stage, dir, parent, results: results.clone() }))
+    }
+
+    /// The commit point: one `rename` of the staging directory onto `<root>/<sweep_id>`. When it
+    /// fails the stage is removed and the failure is settled as for a racing writer
+    /// ([`FileStudyStore::settle_failed_rename`]: a case variant, an identical or different study
+    /// that got there first, or the rename's own `Io` error).
+    fn commit(&mut self, prepared: PreparedWrite) -> Result<String, StoreError> {
+        let FileStage { stage, dir, parent, results } = match prepared.into_token::<FileStage>() {
+            Ok(stage) => stage,
+            Err(PreparedWrite { state: PreparedState::Existing { location }, .. }) => return Ok(location),
+            Err(other) => panic!("FileStudyStore::commit was given a write another store prepared: {other:?}"),
+        };
         match fs::rename(&stage, &dir) {
             Ok(()) => {
                 // Best effort: make the new directory entry durable.
@@ -444,8 +643,20 @@ impl StudyStore for FileStudyStore {
             }
             Err(rename_error) => {
                 let _ = fs::remove_dir_all(&stage);
-                self.settle_failed_rename(&dir, results, rename_error)
+                self.settle_failed_rename(&dir, &results, rename_error)
             }
+        }
+    }
+
+    fn abort(&mut self, prepared: PreparedWrite) -> Result<(), StoreError> {
+        match prepared.into_token::<FileStage>() {
+            Ok(FileStage { stage, .. }) => match fs::remove_dir_all(&stage) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(io_err(&stage, e)),
+            },
+            Err(PreparedWrite { state: PreparedState::Existing { .. }, .. }) => Ok(()),
+            Err(other) => panic!("FileStudyStore::abort was given a write another store prepared: {other:?}"),
         }
     }
 
@@ -828,6 +1039,32 @@ mod tests {
 
         std::fs::create_dir_all(root.join("s2")).unwrap();
         store.put_study(&study("s2", vec![sample(0, 0)])).expect("an empty directory is just filled");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Question 254 item 2: a target the publishing rename would fail on (a non-empty directory
+    /// that holds no study, or a regular file) is a typed `Io` error from `check_plan` and from
+    /// `prepare`, before any stage is built; an empty directory is fine.
+    #[test]
+    fn an_occupied_target_is_refused_by_check_plan_and_prepare_before_any_stage_is_built() {
+        let root = temp_dir("occupied");
+        std::fs::create_dir_all(root.join("s1")).unwrap();
+        std::fs::write(root.join("s1/notes.txt"), b"mine").unwrap();
+        std::fs::write(root.join("s2"), b"a file").unwrap();
+        std::fs::create_dir_all(root.join("s3")).unwrap();
+        let mut store = FileStudyStore::new(&root);
+        for id in ["s1", "s2"] {
+            let results = study(id, vec![sample(0, 0)]);
+            let err = store.check_plan(&StudyPlan::exact(&results)).unwrap_err();
+            assert!(matches!(&err, StoreError::Io { path, .. } if path.ends_with(id)), "{id}: {err:?}");
+            let err = store.prepare(&results).unwrap_err();
+            assert!(matches!(&err, StoreError::Io { path, .. } if path.ends_with(id)), "{id}: {err:?}");
+        }
+        assert_eq!(dir_names(&root), ["s1", "s2", "s3"], "no stage was built");
+        assert_eq!(std::fs::read(root.join("s1/notes.txt")).unwrap(), b"mine");
+        let empty = study("s3", vec![sample(0, 0)]);
+        store.check_plan(&StudyPlan::exact(&empty)).expect("an empty directory is not in the way");
+        store.put_study(&empty).expect("and is replaced by the study");
         let _ = std::fs::remove_dir_all(&root);
     }
 
