@@ -23,11 +23,11 @@ POST /api/cdm/sweep         publish an altavista.v1.SweepResults (binary protobu
                             POST /api/cdm/run (F3, docs/feasibility-plan.md, question 191)
 POST /api/cdm/sweep/sample  open one already-run sample of a published sweep by identity
                             ({"sweepId", "pointIndex", "drawIndex"}, never a path) -- reads
-                            <productsUri>/run_products.pb on this host (the productsUri
-                            this server itself recorded, never one the caller supplies) and
-                            publishes/broadcasts it like POST /api/cdm/run (F3c, this
-                            task's own defect fix for F3's "opens any sample ... through
-                            its products_uri")
+                            <productsUri>/run_products.pb on this host and publishes/
+                            broadcasts it like POST /api/cdm/run (F3c). The productsUri is
+                            what the PUBLISHER sent, so it is untrusted: it is read only
+                            when it resolves inside a study root the operator configured
+                            (``--study-root``, see "Study roots" below; question 254)
 POST /api/clock             broadcast a playback clock to all browsers
 GET  /textures/{file}       planet textures from the GMAT install
 WS   /ws                    push channel (scenario, list, clock messages)
@@ -80,6 +80,21 @@ refuses; an unconfigured gateway must never look like "there are no tile sets" t
 GET  /api/catalog/tilesets                       every tile-set manifest the caller's (verified,
                                                   token-derived) clearance may see -- see
                                                   ``altavista.gateway_client.list_tile_sets``
+
+Study roots (question 254 item 1) -- ``POST /api/cdm/sweep/sample`` reads a file whose
+directory the sweep's *publisher* named, so it reads only under folders the *operator* named.
+Configure them once, at start-up: ``python -m altavista serve --study-root DIR`` (repeatable)
+or ``create_app(study_roots=[DIR, ...])``; never a request parameter, and there is no default
+root and no environment variable. The feasibility panel's normal local use::
+
+    .venv/bin/python -m altavista serve --study-root out        # the repository's out/ folder
+    av-sweep ... --out-dir out/my_study                          # a study run under it
+
+or any user folder (``--study-root ~/studies``) the studies are run into. A relative root is
+taken against the server's working directory when it starts. A sample whose recorded
+``productsUri`` resolves (symlinks followed) outside every root, or any sample when no root is
+configured, is refused with a 403 that names ``--study-root``. Publishing a sweep
+(``POST /api/cdm/sweep``) needs no root: its aggregates are viewable wherever it was produced.
 """
 from __future__ import annotations
 
@@ -237,8 +252,17 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
                 tiles_endpoint: Optional[str] = None,
                 tiles_token_path: Optional[os.PathLike] = None,
                 gateway_endpoint: Optional[str] = None,
-                gateway_token_path: Optional[os.PathLike] = None) -> FastAPI:
-    """``profile`` (M19.5, question 132): which ``profiles/*.yaml`` file's ``imagery:``
+                gateway_token_path: Optional[os.PathLike] = None,
+                study_roots: Sequence[os.PathLike] = ()) -> FastAPI:
+    """``study_roots`` (question 254 item 1): the folders ``POST /api/cdm/sweep/sample`` may read
+    a sample's ``run_products.pb`` under (see the module docstring, "Study roots"). Trusted
+    configuration, like ``command_endpoint`` below: never read from the environment, never a
+    request parameter. Empty (the default) means the route refuses every sample with a 403. A
+    relative root is made absolute against the working directory now; a root that does not exist
+    yet is allowed (a study's out-dir may be created later) but logged, and it admits nothing
+    until it exists. Raises ``ValueError`` for an empty root string.
+
+    ``profile`` (M19.5, question 132): which ``profiles/*.yaml`` file's ``imagery:``
     section every published scenario gets stamped with (``Hub.put``) -- defaults to the
     "design" profile (altavista has no running "current profile" console yet; see
     ``altavista/profile.py``'s module docstring). Raises ``altavista.profile.ProfileError``
@@ -298,6 +322,12 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
     empty ``200 []``) rather than ever failing this function or the app's startup.
     """
     app = FastAPI(title="altavista")
+    study_roots = _normalise_study_roots(study_roots)
+    app.state.study_roots = study_roots
+    for root in study_roots:
+        if not root.is_dir():
+            log.warning("study root %s is not an existing directory; it admits no sweep sample until it is",
+                        root)
     hub = Hub(
         imagery=profile_loader.load_imagery_config(profile, profiles_dir=profiles_dir),
         profile_id=profile,
@@ -679,25 +709,29 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
         **The caller sends an identity, never a path.** The request body is exactly
         ``{"sweepId": str, "pointIndex": int, "drawIndex": int}`` -- three plain
         identifiers, nothing resembling a filesystem path. This handler resolves that
-        identity against the server's OWN state: it looks up the already-published sweep
+        identity against the server's state: it looks up the already-published sweep
         scenario for ``sweepId`` (the one ``POST /api/cdm/sweep`` put in the hub, named
-        ``f"sweep:{sweepId}"``), finds that point/draw in ITS OWN recorded
-        ``sweep["points"]``, and reads the ``productsUri`` THE SERVER ITSELF RECORDED when
-        it published that study -- never a string the HTTP caller supplied (a caller that
-        additionally sends a ``productsUri`` field in the body gets it silently ignored;
-        see ``tests/test_feasibility_join.py``'s own
-        ``test_caller_supplied_products_uri_is_never_trusted`` for the proof). A route that
-        instead read a caller-supplied path directly would be an arbitrary-local-file-read
-        primitive -- any path on the server's filesystem, readable by anyone who can reach
-        this endpoint. This route cannot be that, because the only paths it will ever open
-        are ones that were already inside a scenario THIS SAME SERVER published, at its own
-        earlier ``POST /api/cdm/sweep`` call -- the same trust boundary
-        ``GET /textures/{file}`` already draws for local file reads on this server, just
-        keyed by a study's own identity instead of a filename. No path-sanitisation is
-        layered on top of that on purpose: there is no untrusted path here to sanitise.
-        Adding one would only decorate a boundary that is not "a string pattern this
-        handler happens to accept," it is "identity resolved against this server's own
-        prior state."
+        ``f"sweep:{sweepId}"``), finds that point/draw in its recorded ``sweep["points"]``,
+        and takes the ``productsUri`` recorded there. A ``productsUri`` field in THIS
+        request's body is ignored (``tests/test_feasibility_join.py``'s
+        ``test_caller_supplied_products_uri_is_never_trusted``).
+
+        **The trust rule: the recorded ``productsUri`` is NOT trusted.** It is the body of
+        the publisher's earlier ``POST /api/cdm/sweep``, so anyone who can publish a sweep
+        chooses it. Read unchecked it would let a publisher make this server open (and
+        publish as a scenario) any ``run_products.pb`` on the host. So the file
+        ``<productsUri>/run_products.pb`` is opened only if, with every symlink resolved
+        (``Path.resolve``), it lies inside a **study root** -- a folder the operator named
+        when starting the server (``create_app(study_roots=...)``, repeatable
+        ``--study-root DIR`` of ``python -m altavista serve``). The roots are configuration,
+        never request data; there is no default root and no environment variable. With no
+        root configured the route refuses every sample. The containment test is a path-
+        component test (``Path.is_relative_to`` on resolved paths), so ``/x/root2`` is not
+        inside ``/x/root``, ``..`` segments are removed before the test, and a symlink inside
+        a root that points outside is outside. The containment test runs BEFORE the
+        existence test and its refusal is one fixed message, so the response does not
+        reveal whether a file outside the roots exists. The file is then resolved strictly
+        and checked again, and the bytes are read from the resolved path.
 
         **This route reads local files, so it is only meaningful for a viewer server
         co-located with (on the same machine or shared filesystem as) the study that
@@ -707,14 +741,18 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
         below. That is not a bug to route around; it is an honest report of "this server
         cannot see that file," the same posture ``GET /textures/{file}`` already takes
         (404, never a fabricated texture) for a texture directory this process cannot see.
+        ``POST /api/cdm/sweep`` itself stays permissive for the same reason: a study produced
+        elsewhere is still viewable for its aggregates; only opening a sample reads disk.
 
         Refusals (each its own typed ``HTTPException``, each with its own test in
         ``tests/test_feasibility_join.py``): the request body is malformed (400); no sweep
         named ``sweepId`` has been published to this server (404); that sweep has no such
         ``pointIndex`` (404); that point has no such ``drawIndex`` (404); the sample at that
-        point/draw failed (``error`` non-empty, so it has no run to open -- 409); the
-        directory or ``run_products.pb`` inside it does not exist on this host (404); the
-        file that does exist does not decode as an ``altavista.v1.RunProducts`` (400).
+        point/draw failed (``error`` non-empty, so it has no run to open -- 409); no study
+        root is configured (403, naming ``--study-root``); the recorded ``productsUri`` is
+        not inside a configured study root (403); the ``run_products.pb`` inside it does not
+        exist on this host (404); the file that does exist does not decode as an
+        ``altavista.v1.RunProducts`` (400).
 
         On success: converts ``<productsUri>/run_products.pb`` with the exact same
         ``_run_products_to_scenario_data`` ``POST /api/cdm/run`` uses (one implementation
@@ -774,19 +812,43 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
         # SweepSample.products_uri is the sample's DIRECTORY (verified against
         # crates/av-sweep/src/bin/av-sweep/study.rs's finalize(), which canonicalize()s
         # r.sample_dir -- never a file), so the real RunProducts bytes are one path segment
-        # further in. `products_uri` here came from THIS SERVER'S OWN hub state, never the
-        # request body (see this route's own docstring, "identity, never a path").
+        # further in. `products_uri` here came from the PUBLISHER'S earlier request body, so it
+        # is untrusted: it is opened only if it resolves inside a configured study root (see
+        # this route's own docstring, "the trust rule").
+        if not study_roots:
+            raise HTTPException(
+                403, f"this server has no study root configured, so it opens no sweep sample from disk -- "
+                     f"start it with `--study-root DIR` (create_app(study_roots=[DIR])) naming the folder "
+                     f"the study was run into")
         run_products_path = Path(products_uri) / "run_products.pb"
+        # The containment check comes BEFORE the existence check, and its refusal is one fixed
+        # message whether or not the path exists, so the response never says whether a file
+        # outside the roots is there.
+        outside_roots = HTTPException(
+            403, f"sweep {sweep_id!r} point {point_index} draw {draw_index} recorded a productsUri that "
+                 f"is not an absolute path inside a configured study root (--study-root); "
+                 f"this server opens nothing else")
+        resolved_roots = _resolve_study_roots(study_roots)
+        if _resolved_inside(run_products_path, resolved_roots) is None:
+            raise outside_roots
         if not run_products_path.is_file():
             raise HTTPException(
                 404, f"{run_products_path} does not exist on this host -- this route reads local files, so "
                      f"it only works against a viewer server co-located with the study that produced "
                      f"{sweep_id!r} (see this route's own docstring); a sweep published here after being "
                      f"produced elsewhere legitimately fails this way")
+        # Strict resolve of the file itself (symlinks followed) and a second containment
+        # check on THAT path; the bytes are read from it, not from the unresolved string.
+        try:
+            read_path = _resolved_inside(run_products_path, resolved_roots, strict=True)
+        except FileNotFoundError:  # removed between the is_file() above and here
+            raise HTTPException(404, f"{run_products_path} does not exist on this host")
+        if read_path is None:
+            raise outside_roots
 
         run_products = run_pb2.RunProducts()
         try:
-            run_products.ParseFromString(run_products_path.read_bytes())
+            run_products.ParseFromString(read_path.read_bytes())
         except DecodeError as exc:
             raise HTTPException(400, f"{run_products_path} does not decode as an altavista.v1.RunProducts: {exc}")
 
@@ -1099,6 +1161,54 @@ def _score_result_to_dict(sr: run_pb2.ScoreResult) -> dict:
     }
 
 
+def _normalise_study_roots(study_roots: Sequence[os.PathLike]) -> tuple:
+    """The configured study roots as absolute (not yet symlink-resolved) ``Path``s. A bare
+    string is refused (it would iterate as characters); an empty root string is refused,
+    because ``Path("")`` is the working directory and a typo must not silently open it."""
+    if isinstance(study_roots, (str, bytes, os.PathLike)):
+        raise TypeError("study_roots must be a sequence of folders, not a single path")
+    roots = []
+    for root in study_roots:
+        if not os.fspath(root):
+            raise ValueError("a study root must not be an empty string")
+        roots.append(Path(root).expanduser().absolute())
+    return tuple(roots)
+
+
+def _resolve_study_roots(study_roots: Sequence[Path]) -> List[Path]:
+    """Each configured root with symlinks resolved, evaluated per request so a root that
+    appears (or is re-pointed) after start-up is judged as it is now. A root that does not
+    exist is skipped: it admits nothing."""
+    resolved = []
+    for root in study_roots:
+        try:
+            resolved.append(root.resolve(strict=True))
+        except (OSError, ValueError):
+            continue
+    return resolved
+
+
+def _resolved_inside(path: Path, resolved_roots: Sequence[Path], *, strict: bool = False) -> Optional[Path]:
+    """``path`` with symlinks and ``..`` resolved, if that is inside one of
+    ``resolved_roots`` (``Path.is_relative_to``: a component test, so ``/x/root2`` is not inside
+    ``/x/root``); ``None`` when it is not, when ``path`` is not absolute (a relative path would
+    mean the server's working directory, which the publisher does not choose), or when it
+    cannot be resolved (embedded NUL, symlink loop). ``strict=False`` resolves a path that does
+    not exist yet (the symlinks of its existing part are still followed); ``strict=True``
+    raises ``FileNotFoundError`` for a missing file, for the caller to report."""
+    if not path.is_absolute():
+        return None
+    try:
+        resolved = path.resolve(strict=strict)
+    except FileNotFoundError:
+        if strict:
+            raise
+        return None
+    except (OSError, ValueError, RuntimeError):
+        return None
+    return resolved if any(resolved.is_relative_to(root) for root in resolved_roots) else None
+
+
 def _run_products_to_scenario_data(run_products: run_pb2.RunProducts) -> ScenarioData:
     """Convert a decoded ``altavista.v1.RunProducts`` into the viewer's
     :class:`~altavista.model.ScenarioData` -- the single, shared implementation of "a
@@ -1387,8 +1497,11 @@ def serve(host: str = "0.0.0.0", port: int = DEFAULT_PORT, texture_dir: Optional
           tiles_endpoint: Optional[str] = None,
           tiles_token_path: Optional[os.PathLike] = None,
           gateway_endpoint: Optional[str] = None,
-          gateway_token_path: Optional[os.PathLike] = None) -> None:
-    """Run the viewer server (blocking). ``profile`` -- see ``create_app``'s docstring
+          gateway_token_path: Optional[os.PathLike] = None,
+          study_roots: Sequence[os.PathLike] = ()) -> None:
+    """Run the viewer server (blocking). ``study_roots`` (question 254 item 1) -- see
+    ``create_app``'s own doc; passed straight through as the repeatable ``--study-root`` CLI
+    flag, never read from the process environment. ``profile`` -- see ``create_app``'s docstring
     (M19.5, question 132). ``command_endpoint``/``command_admin_endpoint``/
     ``command_entities`` -- see ``create_app``'s docstring (R3.5a); all three passed straight
     through, never read from the process environment (question 199). ``profiles_dir`` (round 3,
@@ -1409,8 +1522,9 @@ def serve(host: str = "0.0.0.0", port: int = DEFAULT_PORT, texture_dir: Optional
                       command_admin_endpoint=command_admin_endpoint, command_entities=command_entities,
                       profiles_dir=profiles_dir, tiles_endpoint=tiles_endpoint,
                       tiles_token_path=tiles_token_path, gateway_endpoint=gateway_endpoint,
-                      gateway_token_path=gateway_token_path)
-    log.info("altavista viewer at http://%s:%d/  (textures: %s, profile: %s, command_endpoint: %s, tiles_endpoint: %s, gateway_endpoint: %s)",
+                      gateway_token_path=gateway_token_path, study_roots=study_roots)
+    log.info("altavista viewer at http://%s:%d/  (textures: %s, profile: %s, command_endpoint: %s, tiles_endpoint: %s, gateway_endpoint: %s, study_roots: %s)",
              host, port, _default_texture_dir(), profile, command_endpoint or "<not configured>", tiles_endpoint or "<not configured>",
-             gateway_endpoint or "<not configured>")
+             gateway_endpoint or "<not configured>",
+             ", ".join(str(r) for r in app.state.study_roots) or "<none: sweep samples cannot be opened>")
     uvicorn.run(app, host=host, port=port, log_level=log_level)

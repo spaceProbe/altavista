@@ -198,7 +198,9 @@ av-kernel` was never run: nothing this track touches compiles into it.
   the host that ran the study; the panel's first implementation fetched that string from the
   browser and could never have worked. `POST /api/cdm/sweep/sample` takes an identity
   (`sweepId`, `pointIndex`, `drawIndex`) and resolves it against the study the server itself
-  published, so no caller-supplied path is ever opened. The `RunProducts`-to-scenario conversion
+  published, so the *requester* supplies no path. The recorded `productsUri` is still the
+  *publisher's* string, so the file is opened only inside an operator-configured study root
+  (`--study-root`, question 254 item 1; README "Run"). The `RunProducts`-to-scenario conversion
   is now one shared function, which the unedited run-publish tests prove.
 - **The worked study found a modelling assumption before it found a trend.** The manager's own
   design put both of `docs/studies/drag-sail-vs-burn.md`'s axes on `demo_mvr`, which carries no

@@ -233,6 +233,21 @@ Terminal 1 — the viewer server (binds all interfaces so other machines can con
 
 Open `http://<host>:8765/` in as many browsers as you like.
 
+**Feasibility studies: name the folders they run into.** The feasibility panel opens one sample's
+run through `POST /api/cdm/sweep/sample`, which reads `<productsUri>/run_products.pb` off this
+host. The `productsUri` is whatever the sweep's publisher sent, so the server reads it only
+when it resolves (symlinks followed) inside a *study root* you name with `--study-root DIR`
+(repeatable). There is no default root and no environment variable; with none configured every
+sample is refused with a 403 that names the flag.
+
+```bash
+.venv/bin/python -m altavista serve --port 8765 --study-root out          # studies under the repo's out/
+.venv/bin/python -m altavista serve --study-root ~/studies --study-root /data/runs
+```
+
+A relative root is taken against the directory you start the server from. Publishing a sweep
+(`POST /api/cdm/sweep`) needs no root; only opening a sample does.
+
 Terminal 2 — publish a scenario:
 
 ```bash

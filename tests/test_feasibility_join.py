@@ -44,6 +44,10 @@ This file is the fix's own proof, with the real, shipped code and no reimplement
   invariant).
 * A battery of typed-refusal tests, one per refusal ``POST /api/cdm/sweep/sample``'s own
   docstring documents, each with its own test function and its own exact-cause assertion.
+* Section 6 is the trust rule (question 254 item 1): the recorded ``productsUri`` is the
+  publisher's string, so a sample opens only from inside an operator-configured study root --
+  traversal, an absolute path elsewhere, a prefix-sibling, symlink escapes, no root
+  configured; each refusal publishes nothing to the hub.
 * ``test_caller_supplied_products_uri_is_never_trusted`` is this task's break-and-restore
   evidence for the identity-not-path rule: a request that supplies its own ``productsUri``
   field alongside a legitimate ``sweepId``/``pointIndex``/``drawIndex`` for a FAILED sample
@@ -109,7 +113,10 @@ def run_fixture_products(run_fixture_bytes: bytes) -> run_pb2.RunProducts:
 
 @pytest.fixture()
 def client(tmp_path) -> TestClient:
-    app = create_app(texture_dir=tmp_path, web_dir=tmp_path)
+    # The study root is the test's own temp folder: every sample directory the tests below
+    # create lives under it (question 254 item 1: no root configured -> no sample opens).
+    # The containment tests in section 6 build their own app with a narrower root.
+    app = create_app(texture_dir=tmp_path, web_dir=tmp_path, study_roots=[tmp_path])
     return TestClient(app)
 
 
@@ -510,3 +517,168 @@ def test_caller_supplied_products_uri_is_never_trusted(client: TestClient, sweep
         f"refusal as with no extra field, got {resp.status_code}: {resp.text}")
     assert "failed" in resp.json()["detail"].lower()
     assert error_text in resp.json()["detail"]
+
+
+# ============================================================================
+# 6. the trust rule (question 254 item 1): the recorded productsUri is the PUBLISHER'S
+#    string, so a sample opens only from inside an operator-configured study root.
+# ============================================================================
+ROOT_REFUSAL = "not an absolute path inside a configured study root"
+
+
+@pytest.fixture()
+def layout(tmp_path) -> dict:
+    """``tmp_path/root`` is the one configured study root (holding a ``sample`` directory with
+    the real ``run_products.pb``); ``tmp_path/outside`` and ``tmp_path/root2`` (a prefix-sibling
+    of the root's name) each hold a real, decodable ``run_products.pb`` too -- so a route that
+    leaks them answers 200, never a decode error that would look like a refusal."""
+    run_bytes = RUN_FIXTURE_PATH.read_bytes()
+    paths = {"root": tmp_path / "root", "sample": tmp_path / "root" / "sample",
+             "outside": tmp_path / "outside", "sibling": tmp_path / "root2"}
+    for p in paths.values():
+        p.mkdir()
+        (p / "run_products.pb").write_bytes(run_bytes)
+    return paths
+
+
+@pytest.fixture()
+def rooted_client(tmp_path, layout) -> TestClient:
+    return TestClient(create_app(texture_dir=tmp_path, web_dir=tmp_path, study_roots=[layout["root"]]))
+
+
+def _publish_with_uri(client: TestClient, sweep_fixture_bytes: bytes, products_uri: str) -> run_pb2.SweepResults:
+    """Publishes the real sweep with point 0 draw 0's ``products_uri`` set to the arbitrary
+    string ``products_uri`` -- what a publisher is free to send."""
+    sr = run_pb2.SweepResults()
+    sr.ParseFromString(sweep_fixture_bytes)
+    next(s for s in sr.samples if s.point_index == 0 and s.draw_index == 0).products_uri = products_uri
+    _publish_sweep(client, sr)
+    return sr
+
+
+def _scenario_names(client: TestClient) -> list:
+    return client.get("/api/scenarios").json()["names"]
+
+
+def _assert_refused_and_nothing_published(client: TestClient, sr: run_pb2.SweepResults, status: int = 403,
+                                           contains: str = ROOT_REFUSAL) -> dict:
+    before = _scenario_names(client)
+    resp = _open_sample(client, sweep_id=sr.sweep_id, point_index=0, draw_index=0)
+    assert resp.status_code == status, resp.text
+    assert contains in resp.json()["detail"], resp.json()["detail"]
+    assert _scenario_names(client) == before == [f"sweep:{sr.sweep_id}"], \
+        "a refused sample must publish nothing to the hub"
+    return resp.json()
+
+
+def test_sample_inside_a_study_root_opens_and_publishes(rooted_client: TestClient, sweep_fixture_bytes: bytes, layout):
+    sr = _publish_with_uri(rooted_client, sweep_fixture_bytes, str(layout["sample"]))
+    resp = _open_sample(rooted_client, sweep_id=sr.sweep_id, point_index=0, draw_index=0)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["name"] in _scenario_names(rooted_client)
+
+
+def test_root_given_as_a_symlink_admits_samples_under_its_target(tmp_path, sweep_fixture_bytes: bytes, layout):
+    """Both sides are resolved before the check, so a root named through a symlink and a
+    sample named by its real path (as av-sweep's canonicalize() records it) still match."""
+    link = tmp_path / "root_link"
+    link.symlink_to(layout["root"], target_is_directory=True)
+    client = TestClient(create_app(texture_dir=tmp_path, web_dir=tmp_path, study_roots=[link]))
+    sr = _publish_with_uri(client, sweep_fixture_bytes, str(layout["sample"]))
+    assert _open_sample(client, sweep_id=sr.sweep_id, point_index=0, draw_index=0).status_code == 200
+
+
+@pytest.mark.parametrize("uri_of", [
+    pytest.param(lambda L: f"{L['root']}/../outside", id="dotdot-from-root"),
+    pytest.param(lambda L: f"{L['root']}/sample/../../outside", id="dotdot-through-existing-dir"),
+    pytest.param(lambda L: f"{L['root']}/nope/../../outside", id="dotdot-through-missing-dir"),
+])
+def test_traversal_out_of_a_study_root_is_refused(rooted_client: TestClient, sweep_fixture_bytes: bytes, layout, uri_of):
+    sr = _publish_with_uri(rooted_client, sweep_fixture_bytes, uri_of(layout))
+    _assert_refused_and_nothing_published(rooted_client, sr)
+
+
+def test_absolute_path_outside_every_root_is_refused(rooted_client: TestClient, sweep_fixture_bytes: bytes, layout):
+    sr = _publish_with_uri(rooted_client, sweep_fixture_bytes, str(layout["outside"]))
+    _assert_refused_and_nothing_published(rooted_client, sr)
+
+
+def test_prefix_sibling_of_a_root_is_not_inside_it(rooted_client: TestClient, sweep_fixture_bytes: bytes, layout):
+    """``.../root2`` starts with the string ``.../root`` but is not inside it."""
+    assert str(layout["sibling"]).startswith(str(layout["root"]))
+    sr = _publish_with_uri(rooted_client, sweep_fixture_bytes, str(layout["sibling"]))
+    _assert_refused_and_nothing_published(rooted_client, sr)
+
+
+def test_symlinked_directory_inside_a_root_pointing_outside_is_refused(
+        rooted_client: TestClient, sweep_fixture_bytes: bytes, layout):
+    (layout["root"] / "escape").symlink_to(layout["outside"], target_is_directory=True)
+    sr = _publish_with_uri(rooted_client, sweep_fixture_bytes, str(layout["root"] / "escape"))
+    _assert_refused_and_nothing_published(rooted_client, sr)
+
+
+def test_symlinked_run_products_file_inside_a_root_pointing_outside_is_refused(
+        rooted_client: TestClient, sweep_fixture_bytes: bytes, layout):
+    d = layout["root"] / "file_escape"
+    d.mkdir()
+    (d / "run_products.pb").symlink_to(layout["outside"] / "run_products.pb")
+    sr = _publish_with_uri(rooted_client, sweep_fixture_bytes, str(d))
+    _assert_refused_and_nothing_published(rooted_client, sr)
+
+
+@pytest.mark.parametrize("uri", ["relative/sample", "sample", "root\0/sample"], ids=["relative", "bare", "nul-byte"])
+def test_relative_or_unresolvable_products_uri_is_refused(rooted_client: TestClient, sweep_fixture_bytes: bytes, uri):
+    sr = _publish_with_uri(rooted_client, sweep_fixture_bytes, uri)
+    _assert_refused_and_nothing_published(rooted_client, sr)
+
+
+def test_refusal_does_not_reveal_whether_a_path_outside_the_roots_exists(
+        rooted_client: TestClient, sweep_fixture_bytes: bytes, layout, tmp_path):
+    """An outside directory that holds a ``run_products.pb`` and one that does not exist at
+    all draw the identical response."""
+    sr = _publish_with_uri(rooted_client, sweep_fixture_bytes, str(layout["outside"]))
+    existing = _open_sample(rooted_client, sweep_id=sr.sweep_id, point_index=0, draw_index=0)
+    sr = _publish_with_uri(rooted_client, sweep_fixture_bytes, str(tmp_path / "no_such_dir"))
+    missing = _open_sample(rooted_client, sweep_id=sr.sweep_id, point_index=0, draw_index=0)
+    assert existing.status_code == missing.status_code == 403
+    assert existing.json() == missing.json()
+
+
+def test_inside_a_root_but_missing_is_still_the_404(rooted_client: TestClient, sweep_fixture_bytes: bytes, layout):
+    sr = _publish_with_uri(rooted_client, sweep_fixture_bytes, str(layout["root"] / "never_created"))
+    resp = _open_sample(rooted_client, sweep_id=sr.sweep_id, point_index=0, draw_index=0)
+    assert resp.status_code == 404 and "does not exist on this host" in resp.json()["detail"], resp.text
+
+
+def test_no_study_root_configured_refuses_every_sample_naming_the_option(
+        tmp_path, sweep_fixture_bytes: bytes, layout):
+    for roots in ({}, {"study_roots": []}):
+        client = TestClient(create_app(texture_dir=tmp_path, web_dir=tmp_path, **roots))
+        sr = _publish_with_uri(client, sweep_fixture_bytes, str(layout["sample"]))
+        body = _assert_refused_and_nothing_published(client, sr, contains="--study-root")
+        assert "study_roots" in body["detail"]
+
+
+def test_study_root_that_does_not_exist_admits_nothing(tmp_path, sweep_fixture_bytes: bytes, layout):
+    client = TestClient(create_app(texture_dir=tmp_path, web_dir=tmp_path, study_roots=[tmp_path / "later"]))
+    sr = _publish_with_uri(client, sweep_fixture_bytes, str(layout["sample"]))
+    _assert_refused_and_nothing_published(client, sr)
+
+
+def test_study_roots_must_be_a_sequence_of_non_empty_folders(tmp_path):
+    with pytest.raises(ValueError):
+        create_app(texture_dir=tmp_path, web_dir=tmp_path, study_roots=[""])
+    with pytest.raises(TypeError):
+        create_app(texture_dir=tmp_path, web_dir=tmp_path, study_roots=str(tmp_path))
+
+
+def test_serve_flag_study_root_is_repeatable_and_reaches_serve(monkeypatch):
+    import altavista.server
+    from altavista.__main__ import main
+    seen = {}
+    monkeypatch.setattr(altavista.server, "serve", lambda **kw: seen.update(kw))
+    assert main(["serve", "--study-root", "out", "--study-root", "/data/studies"]) == 0
+    assert seen["study_roots"] == ["out", "/data/studies"]
+    seen.clear()
+    assert main(["serve"]) == 0
+    assert seen["study_roots"] == []
