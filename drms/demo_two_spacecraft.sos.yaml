@@ -45,10 +45,12 @@
 #
 # **The ground segment** is three instances, all reusing existing systems unchanged:
 #   - `ground_chaser` and `ground_target`: drms/demo_ground_segment_ground.system.yaml, two
-#     tracking channels of the same Cape-Canaveral-like site. `crate::drm::ground::GroundStationModel`
-#     decodes ONE telemetry port (`Inbox::last_on_port("tm_in")`: two spacecraft sharing one port
-#     would drop one of them whenever both arrive in a step), so each spacecraft gets its own station
-#     instance; a station model with several telemetry ports would be a model change, not made here.
+#     tracking channels of the same Cape-Canaveral-like site. When this fixture was written
+#     `crate::drm::ground::GroundStationModel` decoded only `Inbox::last_on_port("tm_in")` (two
+#     spacecraft sharing one port dropped one of them whenever both arrived in a step), so each
+#     spacecraft got its own station instance. The station now handles every frame on its port, with
+#     contact state per sender (question 254, task 6); this two-station form is kept unchanged (its
+#     recorded products), and drms/demo_two_spacecraft_one_station.* is the same pair on ONE station.
 #     Telemetry: `<sc>_flight.tm_out -> ground_<sc>.tm_in`, FRAMED, `link_model: "latency"`.
 #   - `ground_cmd`: drms/demo_command_ground.system.yaml, the non-physical dispatch instance a
 #     `command` Scenario.event is handed to the router from (crate::drm::command's "from"). The

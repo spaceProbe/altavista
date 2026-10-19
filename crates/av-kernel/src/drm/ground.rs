@@ -58,10 +58,11 @@
 //!
 //! ## Contact windows and the elevation mask
 //!
-//! [`GroundStationModel::step_with_ports`] decodes the latest `tm_in` packet each step (`Inbox::
-//! last_on_port`, question 108's own delivery-order guarantee), computes the topocentric
-//! elevation angle, and compares it against the declared `station.elevation_mask_rad`. A rising
-//! edge (not visible -> visible) sends one FRAMED telecommand packet on `tc_out` (an "AOS"
+//! [`GroundStationModel::step_with_ports`] decodes **every** `tm_in` packet each step, in the
+//! inbox's order (`Inbox::for_port_with_senders`, question 108's own delivery-order guarantee),
+//! computes each one's topocentric elevation angle, and compares it against the declared
+//! `station.elevation_mask_rad`. A rising edge (not visible -> visible) sends one FRAMED
+//! telecommand packet on `tc_out` (an "AOS"
 //! acknowledgment, demonstrating the router-mediated link this module's own doc comment's "link"
 //! section covers) and reports the transition as an `av_dynamics::AppliedCommand` on the reserved
 //! synthetic port [`CONTACT_TRANSITION_PORT`] (never a real declared `Port` name, so it can never
@@ -72,6 +73,36 @@
 //! PORT_COMMAND` already uses -- see `super::events`'s own module doc comment for exactly why the
 //! reserved port name, not a new field on `av_dynamics::AppliedCommand`, is the seam: growing that
 //! struct would ripple through every `DynamicsModel` in this workspace for one model's own need.
+//!
+//! ## More than one sender on `tm_in` (question 254, native open items, task 6)
+//!
+//! Through the container round this model read only `Inbox::last_on_port(tm_port)`: when two
+//! spacecraft sent telemetry to one station in the same step, every frame but the last was silently
+//! dropped (`docs/sil-plan.md`, container-round decision 18 and "Found, not fixed" 1; question 249),
+//! which is why `drms/demo_two_spacecraft.*` carries one station per spacecraft. Now **every frame
+//! on `tm_port` in a step is handled, in the inbox's order**, and:
+//! - **Contact state is per sender**, keyed by the router's sender instance id (question 130; one
+//!   [`SenderLink`] per distinct sender, `None` for a frame whose sender is unknown, which is its own
+//!   key and is handled deterministically like any other): two spacecraft rising and setting
+//!   independently each get their own `CONTACT_START`/`CONTACT_END` and their own AOS acknowledgment.
+//!   Telecommand acknowledgments share one sequence counter (one `tc_out` stream).
+//! - **The `in_contact` output is "any sender in contact"**; for one sender that is exactly the
+//!   sender's own state, as before. `elevation_rad` is the elevation of the last frame handled this
+//!   step. `frames_handled` (new) is the cumulative number of frames decoded and used, over all
+//!   senders, emitted every step; it reaches a product only where a `SystemDefinition` declares
+//!   `output.frames_handled` (`drms/demo_ground_segment_ground_multi.system.yaml`).
+//! - **A contact event names its sender once the station has more than one.** The contact
+//!   `AppliedCommand` carries the sender id in `field` (empty otherwise, which is exactly what the
+//!   events of a one-sender station have always carried: its event ids, details and provenance are
+//!   unchanged); `crate::drm::events::contact_event` reads it. "More than one" means more than one
+//!   distinct sender key has sent a frame to this instance so far (decided from the frames of the step
+//!   being handled too, so two spacecraft in their first step are both attributed). The one limit: a
+//!   sender whose first frame arrives after another sender's transition leaves that earlier event
+//!   unattributed, as it always was.
+//! - **Every undecodable frame is recorded** (question 188), not only the last one.
+//! - A single sender whose frames outpace the station's step (several frames in one step) now has all
+//!   of them handled, in order, rather than only the newest; with one frame per step (every existing
+//!   fixture: their recorded products are unchanged, question 254 task 6's report) nothing differs.
 //!
 //! ## Link model: the router's own latency, not reimplemented
 //!
@@ -390,7 +421,12 @@ pub struct GroundStationModel {
     tc_codec: pb::PacketCodec,
     tc_port: String,
     seq: Cell<u16>,
-    in_contact: Cell<bool>,
+    /// Question 254: per-sender contact state and frame count, keyed by the router's sender id
+    /// (`None`: unknown). A `BTreeMap`, never a hash map (ADR-004: iteration order is part of the
+    /// output). See this module's own doc comment, "More than one sender on `tm_in`".
+    links: RefCell<BTreeMap<Option<String>, SenderLink>>,
+    /// Question 254: frames decoded and used since construction, over all senders.
+    frames_handled: Cell<u64>,
     last_elevation_rad: Cell<f64>,
     info: ModelInfo,
     /// Question 188 (R5.2): every undecodable frame this instance's own most recent
@@ -399,6 +435,14 @@ pub struct GroundStationModel {
     /// mirrors `crate::drm::controller::AttitudeControllerModel::decode_errors_this_step`'s own
     /// doc comment exactly.
     decode_errors_this_step: RefCell<Vec<av_dynamics::DecodeErrorOccurrence>>,
+}
+
+/// One telemetry sender's view from a [`GroundStationModel`] (question 254): whether it is above
+/// the elevation mask as of the last frame handled from it, and how many of its frames were handled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SenderLink {
+    pub in_contact: bool,
+    pub frames_handled: u64,
 }
 
 impl GroundStationModel {
@@ -428,13 +472,24 @@ impl GroundStationModel {
         settings.insert("tc_apid".to_string(), tc_codec.apid.to_string());
         let settings_hash = av_dynamics::settings_hash(&settings);
         let info = ModelInfo { id: model_id.to_string(), version: "1".to_string(), state_space_id: format!("{model_id}.no_state"), frame_id: String::new(), settings_hash, depth: "native".to_string(), ..Default::default() };
-        Ok(Self { spec, tm_codec, tm_port, tc_codec, tc_port, seq: Cell::new(0), in_contact: Cell::new(false), last_elevation_rad: Cell::new(f64::NAN), info, decode_errors_this_step: RefCell::new(Vec::new()) })
+        Ok(Self { spec, tm_codec, tm_port, tc_codec, tc_port, seq: Cell::new(0), links: RefCell::new(BTreeMap::new()), frames_handled: Cell::new(0), last_elevation_rad: Cell::new(f64::NAN), info, decode_errors_this_step: RefCell::new(Vec::new()) })
     }
 
     /// This instance's own declared spec -- exposed for tests and for `super::fault::
     /// apply_ground_station_target`'s own re-materialization path.
     pub fn spec(&self) -> &GroundStationSpec {
         &self.spec
+    }
+
+    /// Question 254: frames decoded and used so far, over all senders -- the `frames_handled` output.
+    pub fn frames_handled(&self) -> u64 {
+        self.frames_handled.get()
+    }
+
+    /// Question 254: every sender that has sent this station a frame on `tm_port`, with its contact
+    /// state and handled-frame count, in key order (`None`, the unknown sender, first).
+    pub fn sender_links(&self) -> Vec<(Option<String>, SenderLink)> {
+        self.links.borrow().iter().map(|(k, v)| (k.clone(), *v)).collect()
     }
 }
 
@@ -459,15 +514,17 @@ impl DynamicsModel for GroundStationModel {
         Ok(self.step_with_ports(state, t_tai_ns, controls, dt_ns, &Inbox::empty())?.0)
     }
 
-    /// Decode the latest `tm_in` packet in `inbox` (if any -- `Inbox::last_on_port`, question
-    /// 108's own "most recently emitted, on ties" order), compute this step's own topocentric
-    /// elevation angle ([`elevation_of`]), and compare it against `spec.elevation_mask_rad`. On a
-    /// rising edge, encodes and pushes one `tc_out` AOS-acknowledgment packet and reports the
-    /// transition via [`CONTACT_TRANSITION_PORT`] (see this module's own doc comment, "Contact
-    /// windows and the elevation mask"); a falling edge reports the transition the same way with
-    /// no outbound packet (there is nothing to acknowledge on loss of contact). No message this
-    /// step (`inbox` carries nothing on `tm_port`) leaves `in_contact`/`last_elevation_rad`
-    /// unchanged -- a gap in telemetry is not itself a loss-of-contact event.
+    /// Decode every `tm_in` packet in `inbox` (if any), in the inbox's order (question 108's own
+    /// delivery order; question 254: every frame, not only the last), compute each one's topocentric
+    /// elevation angle ([`elevation_of`]) and compare it against `spec.elevation_mask_rad`, against the
+    /// contact state of the frame's own sender ([`SenderLink`]). On a rising edge, encodes and pushes
+    /// one `tc_out` AOS-acknowledgment packet and reports the transition via
+    /// [`CONTACT_TRANSITION_PORT`] (see this module's own doc comment, "Contact windows and the
+    /// elevation mask"); a falling edge reports the transition the same way with no outbound packet
+    /// (there is nothing to acknowledge on loss of contact). No message this step (`inbox` carries
+    /// nothing on `tm_port`) leaves every sender's `in_contact`/`last_elevation_rad` unchanged -- a gap
+    /// in telemetry is not itself a loss-of-contact event. The `in_contact` output is "any sender in
+    /// contact"; the contact `AppliedCommand.field` names the sender once more than one has been seen.
     fn step_with_ports(&self, state: &[f64], t_tai_ns: i64, _controls: &[f64], dt_ns: i64, inbox: &Inbox) -> Result<(StepResult, Outbox, Vec<AppliedCommand>), Self::Error> {
         debug_assert!(state.is_empty());
         self.decode_errors_this_step.borrow_mut().clear();
@@ -476,8 +533,22 @@ impl DynamicsModel for GroundStationModel {
         let mut outputs = BTreeMap::new();
         let mut applied = Vec::new();
 
-        if let Some((msg, _sender)) = inbox.last_on_port(&self.tm_port) {
-            match codec::decode_packet(&{ let mut m = codec::ApidMap::new(); m.insert(self.tm_codec.apid, self.tm_codec.clone()); m }, &msg.payload) {
+        // Question 254: register every sender of this step's frames first, so whether the station has
+        // more than one sender (which decides whether a contact event names its sender) does not depend
+        // on which of two simultaneous senders happens to be handled first.
+        let mut links = self.links.borrow_mut();
+        for (_msg, sender) in inbox.for_port_with_senders(&self.tm_port) {
+            links.entry(sender.map(str::to_string)).or_default();
+        }
+        let several_senders = links.len() > 1;
+        let apid_map = {
+            let mut m = codec::ApidMap::new();
+            m.insert(self.tm_codec.apid, self.tm_codec.clone());
+            m
+        };
+
+        for (msg, sender) in inbox.for_port_with_senders(&self.tm_port) {
+            match codec::decode_packet(&apid_map, &msg.payload) {
                 Ok(decoded) => {
                     let get = |name: &str| match decoded.fields.get(name) {
                         Some(FieldValue::Numeric(v)) => *v,
@@ -488,11 +559,16 @@ impl DynamicsModel for GroundStationModel {
                         let elevation = elevation_of(&self.spec, target_ecef_m);
                         self.last_elevation_rad.set(elevation);
                         outputs.insert("elevation_rad".to_string(), elevation);
+                        self.frames_handled.set(self.frames_handled.get() + 1);
+                        let link = links.entry(sender.map(str::to_string)).or_default();
+                        link.frames_handled += 1;
                         let now_visible = elevation >= self.spec.elevation_mask_rad;
-                        let was_visible = self.in_contact.get();
+                        let was_visible = link.in_contact;
+                        // The sender rides in `field` only when the station has several (module doc).
+                        let field = if several_senders { sender.unwrap_or_default().to_string() } else { String::new() };
                         if now_visible && !was_visible {
-                            self.in_contact.set(true);
-                            applied.push(AppliedCommand { port: CONTACT_TRANSITION_PORT.to_string(), field: String::new(), value: CONTACT_START_VALUE, applied_tai_ns: end });
+                            link.in_contact = true;
+                            applied.push(AppliedCommand { port: CONTACT_TRANSITION_PORT.to_string(), field, value: CONTACT_START_VALUE, applied_tai_ns: end });
                             let seq = self.seq.get();
                             self.seq.set(seq.wrapping_add(1) & 0x3FFF);
                             let mut values = BTreeMap::new();
@@ -502,21 +578,23 @@ impl DynamicsModel for GroundStationModel {
                             );
                             outbox.push(self.tc_port.clone(), end, payload);
                         } else if !now_visible && was_visible {
-                            self.in_contact.set(false);
-                            applied.push(AppliedCommand { port: CONTACT_TRANSITION_PORT.to_string(), field: String::new(), value: CONTACT_END_VALUE, applied_tai_ns: end });
+                            link.in_contact = false;
+                            applied.push(AppliedCommand { port: CONTACT_TRANSITION_PORT.to_string(), field, value: CONTACT_END_VALUE, applied_tai_ns: end });
                         }
                     }
                 }
                 // Question 188 (R5.2): an undecodable telemetry frame is recorded, never
-                // silently swallowed as it was through R5.1b -- `in_contact`/`last_elevation_rad`
-                // are deliberately left untouched (a gap in telemetry, decoded or not, is not
-                // itself a contact transition -- this method's own doc comment already states
-                // that for "no message at all"; an undecodable message gets the identical
-                // treatment).
+                // silently swallowed as it was through R5.1b -- every sender's
+                // `in_contact`/`last_elevation_rad` are deliberately left untouched (a gap in
+                // telemetry, decoded or not, is not itself a contact transition -- this method's own
+                // doc comment already states that for "no message at all"; an undecodable message
+                // gets the identical treatment). Question 254: every such frame in the step, not only
+                // the last.
                 Err(e) => self.decode_errors_this_step.borrow_mut().push(codec::decode_error_occurrence(&self.tm_port, msg, &e)),
             }
         }
-        outputs.insert("in_contact".to_string(), if self.in_contact.get() { 1.0 } else { 0.0 });
+        outputs.insert("in_contact".to_string(), if links.values().any(|l| l.in_contact) { 1.0 } else { 0.0 });
+        outputs.insert("frames_handled".to_string(), self.frames_handled.get() as f64);
         Ok((StepResult { state: Vec::new(), t_tai_ns: end, outputs }, outbox, applied))
     }
 
@@ -775,6 +853,131 @@ mod tests {
         let (_r2, _o2, applied2) = model.step_with_ports(&[], 3_000_000_000, &[], 1_000_000_000, &good).unwrap();
         assert_eq!(applied2.len(), 1, "a good frame after the bad one must resume normal contact reporting");
         assert!(model.drain_decode_errors().is_empty(), "no new decode error this call");
+    }
+
+    fn overhead_target(model: &GroundStationModel) -> [f64; 3] {
+        let site_ecef = geodetic_to_ecef_m(model.spec.latitude_rad, model.spec.longitude_rad, model.spec.height_m);
+        let up_unit = ellipsoidal_up_unit(model.spec.latitude_rad, model.spec.longitude_rad);
+        [site_ecef[0] + 500_000.0 * up_unit[0], site_ecef[1] + 500_000.0 * up_unit[1], site_ecef[2] + 500_000.0 * up_unit[2]]
+    }
+    fn far_side_target(model: &GroundStationModel) -> [f64; 3] {
+        let site_ecef = geodetic_to_ecef_m(model.spec.latitude_rad, model.spec.longitude_rad, model.spec.height_m);
+        [-site_ecef[0] * 1.1, -site_ecef[1] * 1.1, -site_ecef[2] * 1.1]
+    }
+
+    /// **Question 254, task 6 (the defect, `docs/sil-plan.md` container-round decision 18 and
+    /// "Found, not fixed" 1; question 249).** Two senders' telemetry frames reach `tm_in` in ONE step,
+    /// in the router's order (chaser first, target last): the chaser is overhead, the target is below
+    /// the horizon. The station handles every frame on the port, so the chaser's rise is seen
+    /// (`CONTACT_START`, one AOS ack, `in_contact == 1`). Fails against the pre-fix `Inbox::
+    /// last_on_port` read, which looked only at the LAST frame (the target's, below the horizon): no
+    /// transition, no ack, `in_contact == 0` -- the chaser's frame was silently dropped.
+    #[test]
+    fn two_senders_on_one_port_in_one_step_are_both_handled() {
+        let model = test_model();
+        let (up, down) = (overhead_target(&model), far_side_target(&model));
+        let inbox = Inbox::new_with_senders(vec![tm_message(&model, up, 0), tm_message(&model, down, 0)], vec![Some("chaser_flight".to_string()), Some("target_flight".to_string())]);
+        let (result, outbox, applied) = model.step_with_ports(&[], 0, &[], 1_000_000_000, &inbox).unwrap();
+        println!("applied: {applied:?}; tc_out packets: {}; outputs: {:?}", outbox.messages().len(), result.outputs);
+        assert_eq!(applied.len(), 1, "the chaser's rise (the first frame) must be handled, not dropped for the target's last frame");
+        assert_eq!(applied[0].value, CONTACT_START_VALUE);
+        assert_eq!(outbox.messages().len(), 1);
+        assert_eq!(result.outputs.get("in_contact"), Some(&1.0));
+        assert_eq!(result.outputs.get("frames_handled"), Some(&2.0), "both frames were handled");
+        // Two senders: the contact transition names the one it came from.
+        assert_eq!(applied[0].field, "chaser_flight");
+    }
+
+    /// **Question 254, proof (unit level): 30 of 30 from each of two senders.** Two senders send one
+    /// frame each per step for 30 steps, both always visible; the model's own per-sender count is 30
+    /// each and 60 in all, with exactly one CONTACT_START per sender (state is per sender) and one ack
+    /// each. Fails against the pre-fix `last_on_port` read (30 handled, all attributed to the last
+    /// sender in the inbox; the first sender never seen).
+    #[test]
+    fn thirty_frames_from_each_of_two_senders_are_all_handled_with_per_sender_contact() {
+        let model = test_model();
+        let up = overhead_target(&model);
+        let mut starts: Vec<(i64, String)> = Vec::new();
+        let mut acks = 0;
+        for step in 0..30i64 {
+            let t = step * 1_000_000_000;
+            let inbox = Inbox::new_with_senders(vec![tm_message(&model, up, t), tm_message(&model, up, t)], vec![Some("chaser_flight".to_string()), Some("target_flight".to_string())]);
+            let (_r, outbox, applied) = model.step_with_ports(&[], t, &[], 1_000_000_000, &inbox).unwrap();
+            acks += outbox.messages().len();
+            starts.extend(applied.iter().filter(|a| a.value == CONTACT_START_VALUE).map(|a| (a.applied_tai_ns, a.field.clone())));
+            assert!(model.drain_decode_errors().is_empty());
+        }
+        let links = model.sender_links();
+        println!("senders: {links:?}; handled {} in all", model.frames_handled());
+        assert_eq!(links.iter().map(|(s, l)| (s.as_deref().unwrap(), l.frames_handled)).collect::<Vec<_>>(), vec![("chaser_flight", 30), ("target_flight", 30)]);
+        assert_eq!(model.frames_handled(), 60);
+        assert_eq!(starts, vec![(1_000_000_000, "chaser_flight".to_string()), (1_000_000_000, "target_flight".to_string())], "one CONTACT_START per sender, in the inbox's order");
+        assert_eq!(acks, 2, "one AOS acknowledgment per sender's rising edge");
+    }
+
+    /// Contact state is per sender: one sender setting does not end the other's contact, and a
+    /// sender's rise is not hidden by another sender already being in contact. Fails against one shared
+    /// `in_contact` flag (the second sender's rise would not be a transition; the first's set would end
+    /// contact while the second still sees the target).
+    #[test]
+    fn contact_state_is_kept_per_sender() {
+        let model = test_model();
+        let (up, down) = (overhead_target(&model), far_side_target(&model));
+        let senders = || vec![Some("a".to_string()), Some("b".to_string())];
+        // Step 1: a rises, b is below the horizon.
+        let (r1, _o, ap1) = model.step_with_ports(&[], 0, &[], 1_000_000_000, &Inbox::new_with_senders(vec![tm_message(&model, up, 0), tm_message(&model, down, 0)], senders())).unwrap();
+        assert_eq!(ap1.iter().map(|a| (a.value, a.field.as_str())).collect::<Vec<_>>(), vec![(CONTACT_START_VALUE, "a")]);
+        assert_eq!(r1.outputs["in_contact"], 1.0);
+        // Step 2: b rises too (a transition although a is already in contact); a stays up.
+        let (r2, _o, ap2) = model.step_with_ports(&[], 1_000_000_000, &[], 1_000_000_000, &Inbox::new_with_senders(vec![tm_message(&model, up, 1_000_000_000), tm_message(&model, up, 1_000_000_000)], senders())).unwrap();
+        assert_eq!(ap2.iter().map(|a| (a.value, a.field.as_str())).collect::<Vec<_>>(), vec![(CONTACT_START_VALUE, "b")]);
+        assert_eq!(r2.outputs["in_contact"], 1.0);
+        // Step 3: a sets, b stays up: a's CONTACT_END only, and the station is still in contact.
+        let (r3, o3, ap3) = model.step_with_ports(&[], 2_000_000_000, &[], 1_000_000_000, &Inbox::new_with_senders(vec![tm_message(&model, down, 2_000_000_000), tm_message(&model, up, 2_000_000_000)], senders())).unwrap();
+        assert_eq!(ap3.iter().map(|a| (a.value, a.field.as_str())).collect::<Vec<_>>(), vec![(CONTACT_END_VALUE, "a")]);
+        assert!(o3.messages().is_empty());
+        assert_eq!(r3.outputs["in_contact"], 1.0, "b is still in contact");
+        // Step 4: only a sends (b's frame is late): b's state is untouched, a's frame (below) changes nothing.
+        let (r4, _o, ap4) = model.step_with_ports(&[], 3_000_000_000, &[], 1_000_000_000, &Inbox::new_with_senders(vec![tm_message(&model, down, 3_000_000_000)], vec![Some("a".to_string())])).unwrap();
+        assert!(ap4.is_empty());
+        assert_eq!(r4.outputs["in_contact"], 1.0);
+    }
+
+    /// A one-sender station's transitions carry no sender in `field` (its events stay exactly what
+    /// they were), whether the sender is known (the router) or not (`Inbox::new`), and a frame with an
+    /// unknown sender is handled deterministically alongside a known one (its own key, `None`).
+    #[test]
+    fn a_single_sender_leaves_field_empty_and_an_unknown_sender_is_its_own_key() {
+        let model = test_model();
+        let up = overhead_target(&model);
+        let (_r, _o, ap) = model.step_with_ports(&[], 0, &[], 1_000_000_000, &Inbox::new_with_senders(vec![tm_message(&model, up, 0)], vec![Some("only".to_string())])).unwrap();
+        assert_eq!(ap.len(), 1);
+        assert_eq!(ap[0].field, "", "one sender: unchanged shape");
+
+        let model = test_model();
+        let (_r, _o, ap) = model.step_with_ports(&[], 0, &[], 1_000_000_000, &Inbox::new(vec![tm_message(&model, up, 0)])).unwrap();
+        assert_eq!((ap.len(), ap[0].field.as_str()), (1, ""), "unknown sender alone: unchanged shape");
+
+        let model = test_model();
+        let inbox = Inbox::new_with_senders(vec![tm_message(&model, up, 0), tm_message(&model, up, 0)], vec![None, Some("known".to_string())]);
+        let (_r, _o, ap) = model.step_with_ports(&[], 0, &[], 1_000_000_000, &inbox).unwrap();
+        assert_eq!(ap.iter().map(|a| a.field.as_str()).collect::<Vec<_>>(), vec!["", "known"], "unknown sender (None sorts first, handled first as the inbox orders it) and a known one are both handled");
+        assert_eq!(model.sender_links().iter().map(|(s, l)| (s.as_deref(), l.frames_handled)).collect::<Vec<_>>(), vec![(None, 1), (Some("known"), 1)]);
+    }
+
+    /// Question 188 with several frames: every undecodable frame in the step is recorded (the pre-fix
+    /// read looked at the last frame only), and the good frames around them are still handled.
+    #[test]
+    fn every_undecodable_frame_in_a_step_is_recorded_and_the_good_ones_are_handled() {
+        let model = test_model();
+        let bad = |t: i64| av_dynamics::PortMessage { port: "tm_in".to_string(), tai_ns: t, payload: vec![0x1F, 0x67, 0xC0, 0x2A, 0x00, 0x0B, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] };
+        let up = overhead_target(&model);
+        let inbox = Inbox::new_with_senders(vec![bad(1), tm_message(&model, up, 2), bad(3)], vec![Some("a".to_string()), Some("b".to_string()), Some("a".to_string())]);
+        let (r, _o, ap) = model.step_with_ports(&[], 0, &[], 1_000_000_000, &inbox).unwrap();
+        let errs = model.drain_decode_errors();
+        assert_eq!(errs.iter().map(|e| e.tai_ns).collect::<Vec<_>>(), vec![1, 3], "both bad frames recorded, in order");
+        assert_eq!(ap.len(), 1, "the good frame between them is handled");
+        assert_eq!(r.outputs["frames_handled"], 1.0);
     }
 
     /// `state_dim() == 0` and `stm_capable() == false` -- the two "decide and state" facts this

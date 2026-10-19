@@ -1,0 +1,306 @@
+# SosConfiguration (proto/altavista/v1/system.proto), YAML transcoding -- native open items, task 6
+# (docs/open-questions.md question 254): the two-spacecraft RPO pair of drms/demo_two_spacecraft.sos.yaml
+# with BOTH spacecraft on ONE ground station. Read that file's header for the spacecraft (six
+# instances each, the attitude loops, the flight computers, the thrusters, the chaser-only
+# telecommand); everything here is byte-identical to it except the ground segment:
+#   - `ground_chaser` and `ground_target` (two tracking channels, one per spacecraft, because
+#     `crate::drm::ground::GroundStationModel` decoded only `Inbox::last_on_port("tm_in")`: with two
+#     spacecraft on one port it silently dropped every frame but the last, so the chaser, which sorts
+#     before the target in the router's delivery order (question 108), was never seen) are replaced by
+#     ONE instance, `ground`;
+#   - `<sc>_flight.tm_out -> ground.tm_in`, FRAMED, `link_model: "latency"`, for both spacecraft: two
+#     senders on one station port, one frame from each in the same step. The station now handles every
+#     frame on the port in the router's order and keeps contact state per sender.
+#   - `ground` is drms/demo_ground_segment_ground_multi.system.yaml, the station system of
+#     drms/demo_ground_segment_ground.system.yaml plus a declared `output.frames_handled` (the count
+#     of telemetry frames the station has handled, which the DRM's measure reads at the end).
+# `ground_cmd` and the telecommand to the chaser are unchanged.
+id: two_spacecraft_one_station_sos
+version: "1"
+name: Two-spacecraft RPO pair, each with its own attitude loop, flight computer and thruster, both on one ground station (native open items, task 6)
+instances:
+  - name: chaser_attitude
+    system_id: attitude_control_truth_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: attitude_control_truth_sys
+  - name: chaser_startracker
+    system_id: attitude_control_startracker_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: attitude_control_startracker_sys
+  - name: chaser_imu
+    system_id: attitude_control_imu_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: attitude_control_imu_sys
+  - name: chaser_controller
+    system_id: attitude_control_controller_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: attitude_control_controller_sys
+  - name: chaser_flight
+    system_id: ground_segment_flight_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: ground_segment_flight_sys
+    step_rate_hz: 1.0
+    parameter_overrides:
+      - name: state.px
+        value: -1850918.80787773
+      - name: state.py
+        value: -6437647.856607104
+      - name: state.pz
+        value: 3263896.1976225306
+  - name: chaser_thruster
+    system_id: command_demo_flight_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: command_demo_flight_sys
+    step_rate_hz: 1.0
+    parameter_overrides:
+      - name: accel.z
+        value: 0.05
+  - name: target_attitude
+    system_id: attitude_control_truth_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: attitude_control_truth_sys
+    parameter_overrides:
+      - name: attitude.q0.z
+        value: 0.059964006479444595
+      - name: attitude.q0.w
+        value: 0.9982005399352042
+  - name: target_startracker
+    system_id: attitude_control_startracker_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: attitude_control_startracker_sys
+    parameter_overrides:
+      - name: startracker.seed
+        value: 3.0
+  - name: target_imu
+    system_id: attitude_control_imu_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: attitude_control_imu_sys
+    parameter_overrides:
+      - name: imu.seed
+        value: 4.0
+  - name: target_controller
+    system_id: attitude_control_controller_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: attitude_control_controller_sys
+  - name: target_flight
+    system_id: ground_segment_flight_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: ground_segment_flight_sys
+    step_rate_hz: 1.0
+    parameter_overrides:
+      - name: state.px
+        value: -1847959.0913929092
+      - name: state.py
+        value: -6437157.8787203785
+      - name: state.pz
+        value: 3263896.1976225306
+  - name: target_thruster
+    system_id: command_demo_flight_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: command_demo_flight_sys
+    step_rate_hz: 1.0
+    parameter_overrides:
+      - name: accel.z
+        value: 0.05
+  - name: ground
+    system_id: ground_station_demo_multi_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: ground_station_demo_multi_sys
+    step_rate_hz: 1.0
+  - name: ground_cmd
+    system_id: command_demo_ground_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: command_demo_ground_sys
+    step_rate_hz: 1.0
+connections:
+  - from_instance: chaser_attitude
+    from_port: truth_qx
+    to_instance: chaser_startracker
+    to_port: truth_qx
+  - from_instance: chaser_attitude
+    from_port: truth_qy
+    to_instance: chaser_startracker
+    to_port: truth_qy
+  - from_instance: chaser_attitude
+    from_port: truth_qz
+    to_instance: chaser_startracker
+    to_port: truth_qz
+  - from_instance: chaser_attitude
+    from_port: truth_qw
+    to_instance: chaser_startracker
+    to_port: truth_qw
+  - from_instance: chaser_attitude
+    from_port: truth_wx
+    to_instance: chaser_startracker
+    to_port: truth_wx
+  - from_instance: chaser_attitude
+    from_port: truth_wy
+    to_instance: chaser_startracker
+    to_port: truth_wy
+  - from_instance: chaser_attitude
+    from_port: truth_wz
+    to_instance: chaser_startracker
+    to_port: truth_wz
+  - from_instance: chaser_attitude
+    from_port: truth_qx
+    to_instance: chaser_imu
+    to_port: truth_qx
+  - from_instance: chaser_attitude
+    from_port: truth_qy
+    to_instance: chaser_imu
+    to_port: truth_qy
+  - from_instance: chaser_attitude
+    from_port: truth_qz
+    to_instance: chaser_imu
+    to_port: truth_qz
+  - from_instance: chaser_attitude
+    from_port: truth_qw
+    to_instance: chaser_imu
+    to_port: truth_qw
+  - from_instance: chaser_attitude
+    from_port: truth_wx
+    to_instance: chaser_imu
+    to_port: truth_wx
+  - from_instance: chaser_attitude
+    from_port: truth_wy
+    to_instance: chaser_imu
+    to_port: truth_wy
+  - from_instance: chaser_attitude
+    from_port: truth_wz
+    to_instance: chaser_imu
+    to_port: truth_wz
+  - from_instance: chaser_startracker
+    from_port: st_meas
+    to_instance: chaser_controller
+    to_port: startracker_in
+  - from_instance: chaser_imu
+    from_port: imu_meas
+    to_instance: chaser_controller
+    to_port: imu_in
+  - from_instance: chaser_controller
+    from_port: wheel_torque_out
+    to_instance: chaser_attitude
+    to_port: wheel_torque_in
+  - from_instance: target_attitude
+    from_port: truth_qx
+    to_instance: target_startracker
+    to_port: truth_qx
+  - from_instance: target_attitude
+    from_port: truth_qy
+    to_instance: target_startracker
+    to_port: truth_qy
+  - from_instance: target_attitude
+    from_port: truth_qz
+    to_instance: target_startracker
+    to_port: truth_qz
+  - from_instance: target_attitude
+    from_port: truth_qw
+    to_instance: target_startracker
+    to_port: truth_qw
+  - from_instance: target_attitude
+    from_port: truth_wx
+    to_instance: target_startracker
+    to_port: truth_wx
+  - from_instance: target_attitude
+    from_port: truth_wy
+    to_instance: target_startracker
+    to_port: truth_wy
+  - from_instance: target_attitude
+    from_port: truth_wz
+    to_instance: target_startracker
+    to_port: truth_wz
+  - from_instance: target_attitude
+    from_port: truth_qx
+    to_instance: target_imu
+    to_port: truth_qx
+  - from_instance: target_attitude
+    from_port: truth_qy
+    to_instance: target_imu
+    to_port: truth_qy
+  - from_instance: target_attitude
+    from_port: truth_qz
+    to_instance: target_imu
+    to_port: truth_qz
+  - from_instance: target_attitude
+    from_port: truth_qw
+    to_instance: target_imu
+    to_port: truth_qw
+  - from_instance: target_attitude
+    from_port: truth_wx
+    to_instance: target_imu
+    to_port: truth_wx
+  - from_instance: target_attitude
+    from_port: truth_wy
+    to_instance: target_imu
+    to_port: truth_wy
+  - from_instance: target_attitude
+    from_port: truth_wz
+    to_instance: target_imu
+    to_port: truth_wz
+  - from_instance: target_startracker
+    from_port: st_meas
+    to_instance: target_controller
+    to_port: startracker_in
+  - from_instance: target_imu
+    from_port: imu_meas
+    to_instance: target_controller
+    to_port: imu_in
+  - from_instance: target_controller
+    from_port: wheel_torque_out
+    to_instance: target_attitude
+    to_port: wheel_torque_in
+  - from_instance: chaser_flight
+    from_port: tm_out
+    to_instance: ground
+    to_port: tm_in
+    link_model: "latency"
+  - from_instance: target_flight
+    from_port: tm_out
+    to_instance: ground
+    to_port: tm_in
+    link_model: "latency"
+  - from_instance: ground_cmd
+    from_port: cmd_out
+    to_instance: chaser_thruster
+    to_port: cmd_in
+    link_model: "latency"
+  - from_instance: chaser_thruster
+    from_port: ack_out
+    to_instance: ground_cmd
+    to_port: ack_in
+    link_model: "latency"
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (native-open t6, question 254)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_sos_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- sos drms/demo_two_spacecraft_one_station.sos.yaml
+hash: "4265d880120993a756774455cc13467e333cf7675efcdaa04cd734ff9cc9bf93"

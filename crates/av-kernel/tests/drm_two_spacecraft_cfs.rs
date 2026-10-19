@@ -8,8 +8,11 @@
 //! computer that broadcasts its Earth-fixed position as FRAMED telemetry
 //! (`drms/demo_ground_segment_flight.system.yaml`, unchanged) and a native thruster that consumes a
 //! FRAMED telecommand and acknowledges it (`drms/demo_command_flight.system.yaml`, unchanged). A
-//! ground segment of two station instances (one tracking channel per spacecraft; a station model
-//! decodes one telemetry port) and a dispatch instance receives both spacecraft's telemetry and
+//! ground segment of two station instances (one tracking channel per spacecraft; kept as recorded,
+//! although a station now handles several senders: question 254, the test
+//! `both_spacecraft_on_one_ground_station_are_each_handled_in_full` over
+//! `drms/demo_two_spacecraft_one_station.*`) and a
+//! dispatch instance receives both spacecraft's telemetry and
 //! sends one telecommand, to the chaser only. In the container runs the two `*_controller`
 //! instances are rebound to `BINDING_KIND_CONTAINER`, each its own container started from the same
 //! image by digest through the fixed-port throwaway registry
@@ -161,8 +164,14 @@ fn string_param(name: &str, value: &str) -> Parameter {
 fn container_sos(id: &str, image: &str, image_digest: &str, variant: &ContainerVariant) -> SosConfiguration {
     let mut sos = base_sos();
     sos.id = id.to_string();
+    rebind_controllers_to_containers(sos, image, image_digest, variant)
+}
+
+/// The rebinding of [`container_sos`] for any SoS that declares the two `*_controller` instances (the
+/// one-station SoS too, question 254): `sos.id` is the caller's.
+fn rebind_controllers_to_containers(mut sos: SosConfiguration, image: &str, image_digest: &str, variant: &ContainerVariant) -> SosConfiguration {
     for (i, name) in CONTAINER_PARTS.iter().enumerate() {
-        let inst = sos.instances.iter_mut().find(|inst| inst.name == *name).unwrap_or_else(|| panic!("demo_two_spacecraft.sos.yaml must declare {name}"));
+        let inst = sos.instances.iter_mut().find(|inst| inst.name == *name).unwrap_or_else(|| panic!("the SoS must declare {name}"));
         inst.system_id = "attitude_control_controller_cfs_sys".to_string();
         inst.step_rate_hz = 10.0;
         inst.binding = Some(Binding { kind: BindingKind::Container as i32, config: Some(av_cdm::pb::binding::Config::Container(ContainerBinding { image: image.to_string(), image_digest: image_digest.to_string(), ..Default::default() })) });
@@ -720,6 +729,240 @@ fn the_native_two_spacecraft_run_follows_the_closed_form() {
         println!("native {sc}: theta({DURATION_S}s)={theta:.6} rad, closed form {expected:.6} rad ({:.3}%)", (theta - expected) / expected * 100.0);
         assert!((theta - expected).abs() / expected < 0.10, "{sc}: native theta={theta} vs closed form {expected}");
     }
+}
+
+// ------------------------------------------------------------------------------------------
+// Both spacecraft on ONE ground station (question 254, native open items, task 6).
+// ------------------------------------------------------------------------------------------
+
+/// The one-station DRM's own window, `drms/demo_two_spacecraft_one_station.drm.yaml`: 31 s, one second
+/// longer than the two-station DRM's [`DURATION_S`], so that every frame each spacecraft sends in its
+/// first 30 s is handled (a frame sent at `s` is available at `s + 100 ms` and handled by the station
+/// step ending at `s + 1 s`; the frame sent at 31 s is the one still in flight when the window closes).
+const ONE_STATION_DURATION_S: i64 = 31;
+/// Telemetry frames each spacecraft sends over that window (one per 1 Hz flight step).
+const FRAMES_SENT_PER_SPACECRAFT: usize = ONE_STATION_DURATION_S as usize;
+/// The frames each spacecraft sends in its first 30 s: all of them are handled.
+const FRAMES_FIRST_30_S: usize = 30;
+
+/// `systems` plus the station system of the one-station DRM (`drms/demo_ground_segment_ground_multi.
+/// system.yaml`, which declares `output.frames_handled`).
+fn with_one_station_ground(mut systems: BTreeMap<String, SystemDefinition>) -> BTreeMap<String, SystemDefinition> {
+    let ground = load_system("demo_ground_segment_ground_multi");
+    systems.insert(ground.id.clone(), ground);
+    systems
+}
+
+/// `drms/demo_two_spacecraft_one_station.sos.yaml`, both controllers `BINDING_KIND_MODEL`. `without`:
+/// leave that spacecraft's telemetry connection out (in memory), so the station has one sender -- the
+/// baseline each spacecraft's own count is read from.
+fn one_station_sos(id: &str, without: Option<&str>) -> SosConfiguration {
+    let mut sos = schema::parse_sos_yaml(&read("demo_two_spacecraft_one_station.sos.yaml")).expect("demo_two_spacecraft_one_station.sos.yaml parses");
+    sos.id = id.to_string();
+    if let Some(sc) = without {
+        let flight = format!("{sc}_flight");
+        sos.connections.retain(|c| !(c.from_instance == flight && c.from_port == "tm_out"));
+    }
+    sos.hash = hash::canonical_sos_hash(&sos);
+    sos
+}
+
+fn one_station_drm(id: &str, sos_id: &str) -> DesignReferenceMission {
+    let mut drm = schema::parse_drm_yaml(&read("demo_two_spacecraft_one_station.drm.yaml")).expect("demo_two_spacecraft_one_station.drm.yaml parses");
+    let sc = drm.scenario.as_ref().expect("scenario");
+    assert_eq!(sc.end_tai_ns - sc.start_tai_ns, ONE_STATION_DURATION_S * 1_000_000_000, "the DRM file declares the {ONE_STATION_DURATION_S} s window this test is written for");
+    drm.id = id.to_string();
+    drm.sos_configuration_id = sos_id.to_string();
+    drm.hash = hash::canonical_drm_hash(&drm);
+    drm
+}
+
+/// A native run of the one-station DRM (the station is independent of how the controllers are bound).
+fn one_station_run(label: &str, without: Option<&str>) -> (RunProducts, PortTrafficLog, BTreeMap<String, SystemDefinition>, SosConfiguration) {
+    let systems = with_one_station_ground(native_systems());
+    let sos = one_station_sos("two_spacecraft_one_station_sos", without);
+    let drm = one_station_drm("two_spacecraft_one_station_drm", &sos.id);
+    let dir = scratch_dir(label);
+
+    let _engine = gmat_sys::engine_lock();
+    let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+    // One run id for every call (the id is in every event's provenance): two runs compare equal.
+    let products = execute(run_config(&gmat, &drm, &sos, &systems, "test-run-two-sc-one-station", Some(dir.clone()))).unwrap_or_else(|e| panic!("the one-station two-spacecraft run {label} must execute: {e:?}"));
+    let sidecar = std::fs::read(dir.join("port_traffic.pb")).expect("port_traffic.pb");
+    let _ = std::fs::remove_dir_all(&dir);
+    (products, decode_log(&sidecar), systems, sos)
+}
+
+fn declared_port_latency_ns(systems: &BTreeMap<String, SystemDefinition>, sos: &SosConfiguration, instance: &str, port: &str) -> i64 {
+    let inst = sos.instances.iter().find(|i| i.name == instance).unwrap_or_else(|| panic!("instance {instance}"));
+    let p = systems[&inst.system_id].ports.iter().find(|p| p.name == port).unwrap_or_else(|| panic!("port {port} of {instance}"));
+    p.timing.as_ref().map(|t| t.latency_ns).unwrap_or(0)
+}
+
+/// What a run of the one-station DRM with BOTH spacecraft must show, native or container-bound alike
+/// (the station and the flight computers are native in both). Returns the station's own count,
+/// `output.ground.frames_handled@end`.
+///
+/// - **Sent and carried:** each flight sends 31 frames; the router carries all 31 + 31 to `ground.tm_in`.
+/// - **Available:** a frame sent at `s` is available at `s` plus the declared link latency (the
+///   flight's `tm_out` plus the station's `tm_in`, read from the systems, 100 ms); of each spacecraft's
+///   31, the 30 sent in the first 30 s are available before the window closes and the 31st (sent at
+///   31 s) is still in flight.
+/// - **Handled:** the station's count is 60 = 30 + 30, so no available frame was dropped, and, since a
+///   spacecraft cannot have more frames handled than were available, 30 from each.
+/// - **Per sender:** one CONTACT_START each, attributed, unique ids, no decode errors; one AOS ack each.
+fn check_one_station(products: &RunProducts, log: &PortTrafficLog, systems: &BTreeMap<String, SystemDefinition>, sos: &SosConfiguration) -> f64 {
+    let map = apid_map(systems);
+    let end_ns = START_TAI_NS + ONE_STATION_DURATION_S * 1_000_000_000;
+    let latency_ns = declared_port_latency_ns(systems, sos, "chaser_flight", "tm_out") + declared_port_latency_ns(systems, sos, "ground", "tm_in");
+    assert_eq!(latency_ns, 100_000_000, "the declared link latency");
+
+    // --- Sent and carried: 31 frames from each, told apart by payload (the streams are distinct).
+    let delivered = records(log, "ground", "tm_in", PortDirection::In);
+    let mut sent_by: BTreeMap<&str, BTreeSet<Vec<u8>>> = BTreeMap::new();
+    for sc in SPACECRAFT {
+        let out = records(log, &format!("{sc}_flight"), "tm_out", PortDirection::Out);
+        assert_eq!(out.len(), FRAMES_SENT_PER_SPACECRAFT, "{sc}_flight sends one position packet per 1 Hz step");
+        sent_by.insert(sc, out.iter().map(|r| r.payload.clone()).collect());
+    }
+    assert!(sent_by["chaser"].is_disjoint(&sent_by["target"]), "the two telemetry streams are distinct");
+    assert_eq!(delivered.len(), 2 * FRAMES_SENT_PER_SPACECRAFT, "the router carries every frame of both spacecraft to the one station port");
+    println!("dropped in flight at the end of the run (all instances): {}", products.dropped_in_flight_messages);
+
+    // --- Available before the window closed, per sender.
+    let mut available = BTreeMap::new();
+    for sc in SPACECRAFT {
+        let mine: Vec<&&PortTrafficRecord> = delivered.iter().filter(|r| sent_by[sc].contains(&r.payload)).collect();
+        let in_time = mine.iter().filter(|r| r.tai_ns + latency_ns <= end_ns).count();
+        let in_flight: Vec<f64> = mine.iter().filter(|r| r.tai_ns + latency_ns > end_ns).map(|r| (r.tai_ns - START_TAI_NS) as f64 / 1e9).collect();
+        println!("{sc}: sent {}, carried {}, available before the window closed {in_time}, still in flight at the end: sent at {in_flight:?} s", FRAMES_SENT_PER_SPACECRAFT, mine.len());
+        assert_eq!(mine.len(), FRAMES_SENT_PER_SPACECRAFT, "{sc}: all 31 frames are carried to the station");
+        assert_eq!(in_time, FRAMES_FIRST_30_S, "{sc}: the 30 frames sent in the first 30 s are available before the window closes");
+        assert_eq!(in_flight, vec![ONE_STATION_DURATION_S as f64], "{sc}: only the frame sent at 31 s is still in flight");
+        available.insert(sc, in_time as f64);
+    }
+
+    // --- Handled: the station's own count.
+    let handled = products.scores.get("ground_frames_handled").expect("the DRM's ground_frames_handled measure is scored").value;
+    println!("ground.frames_handled@end = {handled} (available: chaser {}, target {})", available["chaser"], available["target"]);
+    assert_eq!(handled, available["chaser"] + available["target"], "the station handled every frame that reached it, from both spacecraft: 30 + 30");
+    assert_eq!(handled, (2 * FRAMES_FIRST_30_S) as f64);
+
+    // --- Per sender: one CONTACT_START each (state is kept per sender: with one shared state the
+    //     second spacecraft's rise would be invisible), none ended, and no frame was undecodable.
+    let mut starters = BTreeMap::new();
+    for e in products.events.iter().filter(|e| e.entity_id == "ground") {
+        if e.kind == EventKind::ContactStart as i32 || e.kind == EventKind::ContactEnd as i32 {
+            let sender = e.provenance.as_ref().and_then(|p| p.attributes.get("sender")).cloned().unwrap_or_default();
+            println!("ground: {} sender={sender:?} at t={} s id={}", e.name, (e.tai_ns - START_TAI_NS) as f64 / 1e9, e.id);
+            assert_eq!(e.kind, EventKind::ContactStart as i32, "the pass does not set inside the window: {e:?}");
+            assert!(starters.insert(sender, e.tai_ns).is_none(), "one CONTACT_START per sender");
+            assert!(e.detail.contains(&e.provenance.as_ref().unwrap().attributes["sender"]), "the event detail names the sender: {}", e.detail);
+        }
+    }
+    assert_eq!(starters.keys().map(String::as_str).collect::<Vec<_>>(), vec!["chaser_flight", "target_flight"], "each spacecraft's rise is reported, attributed to it");
+    for (sender, tai_ns) in &starters {
+        let t = (tai_ns - START_TAI_NS) as f64 / 1e9;
+        assert!((6.0..=8.0).contains(&t), "{sender}: AOS expected at 7 s (closed-form mask crossing 5.19 s target / 5.59 s chaser; the first frame above the mask is sent at 6 s, arrives at 6.1 s, is handled by the step ending at 7 s), got {t}");
+    }
+    let distinct_ids: BTreeSet<&str> = products.events.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(distinct_ids.len(), products.events.len(), "every event id is unique, two contact starts at one epoch included");
+    assert!(products.events.iter().all(|e| !e.name.starts_with("decode_error")), "no telemetry frame is undecodable");
+
+    // --- The station acknowledges each AOS on tc_out: one ack per sender's rising edge, sequenced.
+    let acks = records(log, "ground", "tc_out", PortDirection::Out);
+    let seqs: Vec<u16> = acks.iter().map(|r| decode(&map, r).sequence_count).collect();
+    println!("ground.tc_out: {} AOS acknowledgments, sequence counts {seqs:?}", acks.len());
+    assert_eq!(seqs, vec![0, 1], "one AOS acknowledgment per spacecraft, in sequence");
+    handled
+}
+
+/// **Question 254, task 6 (native).** Both spacecraft send their telemetry to ONE ground station and
+/// the station handles every frame of each: 30 of the 30 frames each sends in the first 30 s (the 31 s
+/// window leaves only each spacecraft's 31st frame in flight, [`check_one_station`]). Before the
+/// station processed every frame on its port (`GroundStationModel::step_with_ports` read only
+/// `Inbox::last_on_port`), two frames reaching `tm_in` in one step left only the last handled, so
+/// 30 of the 60 and none of the chaser's. The port-traffic log records what the router CARRIED (31 +
+/// 31 frames either way), so the proof reads the station's own count (`output.ground.frames_handled@
+/// end`, the DRM's `ground_frames_handled` measure), and compares it with what each spacecraft alone
+/// gets handled (the same DRM with the other's telemetry connection left out: one sender).
+#[test]
+fn both_spacecraft_on_one_ground_station_are_each_handled_in_full() {
+    let (products, log, systems, sos) = one_station_run("handled", None);
+    let handled = check_one_station(&products, &log, &systems, &sos);
+
+    let mut alone = BTreeMap::new();
+    for sc in SPACECRAFT {
+        let other = if sc == "chaser" { "target" } else { "chaser" };
+        let (solo, ..) = one_station_run(&format!("solo-{sc}"), Some(other));
+        alone.insert(sc, solo.scores["ground_frames_handled"].value);
+    }
+    println!("ground.frames_handled@end: {handled} with both spacecraft; chaser alone {}, target alone {}", alone["chaser"], alone["target"]);
+    assert_eq!((alone["chaser"], alone["target"]), (FRAMES_FIRST_30_S as f64, FRAMES_FIRST_30_S as f64), "alone, each spacecraft gets 30 of its first 30 frames handled");
+    assert_eq!(handled, alone["chaser"] + alone["target"], "sharing a station loses nothing: both together are handled as often as each alone (before the fix: only the last frame of each step, half)");
+}
+
+/// The same run twice gives byte-identical products and port traffic: the per-sender handling is
+/// deterministic (the router's order, not hash order), the property question 108 exists for.
+#[test]
+fn the_one_station_run_is_deterministic() {
+    let (a, log_a, ..) = one_station_run("det-a", None);
+    let (b, log_b, ..) = one_station_run("det-b", None);
+    // (`assert!`, not `assert_eq!`: a mismatch must not print two whole event lists.)
+    assert!(a.events == b.events, "events differ between two runs of the same DRM");
+    assert!(a.scores == b.scores, "scores differ between two runs of the same DRM");
+    assert!(log_a.records == log_b.records, "port traffic differs between two runs of the same DRM");
+    for (name, ta) in &a.trajectories {
+        assert!(ta.samples == b.trajectories[name].samples, "{name}: samples differ between two runs");
+    }
+}
+
+/// **Question 254, task 6 (container-bound).** The two-spacecraft DRM of this file, each controller
+/// through its own cFS container exactly as the two-station tests bind them, with both spacecraft on
+/// ONE ground station: the same delivered/available/handled counts and per-sender CONTACT_STARTs as the
+/// native run ([`check_one_station`]), and each container really ran (both were seen live by their
+/// labels, both returned torque frames). Takes the engine and docker locks as the other docker tests
+/// do, and leaves nothing behind.
+#[test]
+fn both_spacecraft_through_their_own_containers_on_one_ground_station_are_each_handled_in_full() {
+    if skip_if_cfs_image_unavailable("both_spacecraft_through_their_own_containers_on_one_ground_station_are_each_handled_in_full") {
+        return;
+    }
+    const RUN_ID: &str = "test-run-two-sc-one-station-cfs";
+    let _engine = gmat_sys::engine_lock();
+    let (lock, docker_run_id) = lock_and_prune_docker_tests();
+    let systems = with_one_station_ground(container_systems());
+    let cfs_image_id = docker_lines(&["inspect", "--format", "{{.Id}}", &cfs_common::cfs_image()]).into_iter().next().expect("the cFS image is present (the gate checked)");
+    let before = DockerSnapshot::take();
+    let registry_volumes;
+    let (sos, run, seen);
+    {
+        let mut volume_guard = RegistryVolumeGuard(Vec::new());
+        let (image, digest, registry_guards) = push_cfs_image_to_local_registry(&docker_run_id);
+        volume_guard.0 = container_volumes(&registry_guards.0 .0);
+        registry_volumes = volume_guard.0.clone();
+        sos = rebind_controllers_to_containers(one_station_sos("two_spacecraft_one_station_cfs_sos", None), &image, &digest, &ContainerVariant::default());
+        let drm = one_station_drm("two_spacecraft_one_station_cfs_drm", &sos.id);
+        let dir = scratch_dir("one-station-cfs");
+        let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+        let watcher = LabelWatcher::start(RUN_ID);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute_container_run(&gmat, &drm, &sos, &systems, RUN_ID, &dir, "one-station")));
+        seen = watcher.finish();
+        run = result.unwrap_or_else(|p| std::panic::resume_unwind(p));
+        drop(registry_guards);
+        drop(volume_guard);
+    }
+    let after = DockerSnapshot::take();
+    let leftovers = Leftovers::take(&before, &cfs_image_id, RUN_ID);
+    drop(lock);
+
+    let log = decode_log(&run.sidecar);
+    assert_eq!(seen.iter().map(|c| c.instance.as_str()).collect::<BTreeSet<_>>(), BTreeSet::from(["chaser_controller", "target_controller"]), "both controllers ran in their own containers: {seen:?}");
+    for controller in CONTAINER_PARTS {
+        assert!(!records(&log, controller, "wheel_torque_out", PortDirection::Out).is_empty(), "{controller} returned torque frames");
+    }
+    check_one_station(&run.products, &log, &systems, &sos);
+    assert_nothing_left(&before, &after, &leftovers, RUN_ID, &registry_volumes);
 }
 
 // ------------------------------------------------------------------------------------------

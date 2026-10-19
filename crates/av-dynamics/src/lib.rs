@@ -140,6 +140,13 @@ impl Inbox {
     pub fn for_port<'a>(&'a self, port: &'a str) -> impl Iterator<Item = &'a PortMessage> {
         self.messages.iter().filter(move |m| m.port == port)
     }
+    /// [`Inbox::for_port`] with each message's sender (question 130; `None` when unknown, as in
+    /// every [`Inbox::new`]-built `Inbox`) -- the same order, so a consumer that handles every frame on
+    /// a port (question 254: `av_kernel::drm::ground::GroundStationModel`) sees the router's own
+    /// deterministic order and each frame's attribution together.
+    pub fn for_port_with_senders<'a>(&'a self, port: &'a str) -> impl Iterator<Item = (&'a PortMessage, Option<&'a str>)> {
+        self.messages.iter().zip(self.senders.iter()).filter(move |(m, _)| m.port == port).map(|(m, s)| (m, s.as_deref()))
+    }
     /// The *last* message on `port` (question 108: last among ties on one port is the most
     /// recently emitted) together with its sender, if known -- `None` if no message on this
     /// port is present at all. The one place a port's "the message" selection logic lives, so
@@ -822,5 +829,23 @@ mod tests {
         assert_eq!(sender_b, None, "a message with no known sender reports None, not a fabricated id");
 
         assert!(inbox.last_on_port("c").is_none(), "a port with no message at all reports None");
+    }
+
+    /// Question 254: `for_port_with_senders` yields every message on the port, in the inbox's own
+    /// order, each with its own sender -- not only the last one (`last_on_port`).
+    #[test]
+    fn inbox_for_port_with_senders_yields_every_message_on_the_port_in_order_with_its_sender() {
+        let messages = vec![
+            PortMessage { port: "a".to_string(), tai_ns: 1, payload: vec![] },
+            PortMessage { port: "b".to_string(), tai_ns: 2, payload: vec![] },
+            PortMessage { port: "a".to_string(), tai_ns: 3, payload: vec![] },
+            PortMessage { port: "a".to_string(), tai_ns: 4, payload: vec![] },
+        ];
+        let inbox = Inbox::new_with_senders(messages, vec![Some("s1".to_string()), Some("sb".to_string()), Some("s2".to_string()), None]);
+        let a: Vec<(i64, Option<&str>)> = inbox.for_port_with_senders("a").map(|(m, s)| (m.tai_ns, s)).collect();
+        assert_eq!(a, vec![(1, Some("s1")), (3, Some("s2")), (4, None)]);
+        assert_eq!(inbox.for_port_with_senders("c").count(), 0);
+        let legacy: Vec<i64> = inbox.for_port("a").map(|m| m.tai_ns).collect();
+        assert_eq!(legacy, a.iter().map(|(t, _)| *t).collect::<Vec<_>>(), "same messages, same order as for_port");
     }
 }

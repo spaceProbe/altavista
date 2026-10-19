@@ -1,0 +1,101 @@
+# SystemDefinition (proto/altavista/v1/system.proto), YAML transcoding -- native open items, task 6
+# (docs/open-questions.md question 254). drms/demo_ground_segment_ground.system.yaml, unchanged in
+# every physical respect (same site, mask, ports, codecs), for a station that MORE THAN ONE spacecraft
+# sends telemetry to (drms/demo_two_spacecraft_one_station.*): `crate::drm::ground::
+# GroundStationModel` handles every frame on `tm_in` in a step and keeps contact state per sender.
+# The one addition is `output.frames_handled`, declared so a measure can read it: the cumulative
+# count of telemetry frames the station decoded and used, over all senders (the station emits it every
+# step; an instance whose system does not declare it exposes nothing new, so the original system and
+# every DRM that uses it are untouched).
+id: ground_station_demo_multi_sys
+version: "1"
+name: Native ground station for several spacecraft, Cape-Canaveral-like site (native open items, task 6)
+dynamics_model: ground.station_demo_multi
+state_space_id: ground.station_demo_multi.space
+state_space:
+  id: ground.station_demo_multi.space
+  components: []
+ports:
+  - name: tm_in
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_IN
+    schema: ccsds.spp
+    timing:
+      latency_ns: 50000000
+  - name: tc_out
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_OUT
+    schema: ccsds.spp
+    timing:
+      latency_ns: 50000000
+packet_codecs:
+  - id: ground_tm_in_codec
+    apid: 500
+    is_command: false
+    secondary_header_bytes: 0
+    user_data_bytes: 24
+    description: "target Earth-fixed Cartesian position telemetry, decoded (M25.1)"
+    fields:
+      - name: x
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER
+        scale: 1.0
+        offset: 0.0
+      - name: y
+        bit_offset: 64
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER
+        scale: 1.0
+        offset: 0.0
+      - name: z
+        bit_offset: 128
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER
+        scale: 1.0
+        offset: 0.0
+  - id: ground_tc_out_codec
+    apid: 501
+    is_command: true
+    secondary_header_bytes: 0
+    user_data_bytes: 4
+    description: "AOS acknowledgment telecommand, encoded (M25.1)"
+    fields:
+      - name: seq
+        bit_offset: 0
+        bit_width: 32
+        type: PACKET_FIELD_TYPE_UINT
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+parameters:
+  - name: station.body
+    string_value: Earth
+  - name: station.latitude_rad
+    value: 0.49741883681838395
+    unit: UNIT_RADIAN
+  - name: station.longitude_rad
+    value: -1.4067353771074296
+    unit: UNIT_RADIAN
+  - name: station.height_m
+    value: 0.0
+    unit: UNIT_METER
+  - name: station.elevation_mask_rad
+    value: 0.17453292519943295
+    unit: UNIT_RADIAN
+  - name: output.elevation_rad
+    unit: UNIT_RADIAN
+  - name: output.in_contact
+    unit: UNIT_DIMENSIONLESS
+  - name: output.frames_handled
+    unit: UNIT_DIMENSIONLESS
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (native-open t6, question 254)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_system_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- system drms/demo_ground_segment_ground_multi.system.yaml
+hash: "821781aae15fc8dad842f3d5fee524e075a2d0a67f59b74ef3d05b4049966d03"

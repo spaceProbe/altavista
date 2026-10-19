@@ -497,15 +497,22 @@ pub fn decode_error_end_event(episode: &DecodeErrorEpisode, end_tai_ns: i64, res
 /// "Contact windows and the elevation mask", for why the reserved port name is the seam).
 /// `entity_id` is the receiving (ground) instance -- `cmd.instance`, the same field
 /// [`port_command_event`] already uses.
+///
+/// **Question 254 (native open items, task 6): which spacecraft.** A station with more than one
+/// telemetry sender names the sender of the frame behind a transition in `cmd.field` (empty for a
+/// one-sender station: `crate::drm::ground`'s module doc comment, "More than one sender on `tm_in`").
+/// When `field` is non-empty it is the event's `sender` (provenance attribute and detail text) and is
+/// part of the event id, so two spacecraft rising in the same step are two distinct events rather
+/// than one id twice; when it is empty the event is exactly what it has always been.
 pub fn contact_event(cmd: &crate::ports::AppliedPortCommand, mut provenance: Provenance) -> Event {
     let is_start = cmd.value == crate::drm::ground::CONTACT_START_VALUE;
     let kind = if is_start { EventKind::ContactStart } else { EventKind::ContactEnd };
     let name = if is_start { "contact_start" } else { "contact_end" };
-    let sender = cmd.sender.clone().unwrap_or_default();
+    let sender = if cmd.field.is_empty() { cmd.sender.clone().unwrap_or_default() } else { cmd.field.clone() };
     provenance.attributes.insert("instance".to_string(), cmd.instance.clone());
     provenance.attributes.insert("sender".to_string(), sender.clone());
     Event {
-        id: format!("contact:{}:{}:{}", cmd.instance, cmd.applied_tai_ns, name),
+        id: if cmd.field.is_empty() { format!("contact:{}:{}:{}", cmd.instance, cmd.applied_tai_ns, name) } else { format!("contact:{}:{}:{}:{}", cmd.instance, cmd.applied_tai_ns, name, cmd.field) },
         entity_id: cmd.instance.clone(),
         tai_ns: cmd.applied_tai_ns,
         kind: kind as i32,
@@ -661,6 +668,26 @@ pub fn declared_events(scenario: &Scenario, instance_names: &[String], maneuvers
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Question 254 (task 6): a contact transition with no sender in `field` is the event it has
+    /// always been (id, detail, empty `sender` attribute -- a one-sender station's events do not
+    /// move); one with a sender in `field` names it in the attribute, the detail and the id, so two
+    /// spacecraft rising at one epoch are two distinct events. Fails against a `contact_event` that
+    /// ignores `field` (the two ids would collide, the sender attribute stay empty).
+    #[test]
+    fn contact_event_names_the_sender_only_when_the_station_reported_one() {
+        let cmd = |field: &str| crate::ports::AppliedPortCommand { instance: "ground".to_string(), port: crate::drm::ground::CONTACT_TRANSITION_PORT.to_string(), field: field.to_string(), value: crate::drm::ground::CONTACT_START_VALUE, applied_tai_ns: 6_000_000_000, sender: None };
+        let plain = contact_event(&cmd(""), Provenance::default());
+        assert_eq!(plain.id, "contact:ground:6000000000:contact_start");
+        assert_eq!(plain.detail, "ground instance \"ground\": contact_start (target \"\")");
+        assert_eq!(plain.provenance.as_ref().unwrap().attributes["sender"], "");
+        let (a, b) = (contact_event(&cmd("chaser_flight"), Provenance::default()), contact_event(&cmd("target_flight"), Provenance::default()));
+        assert_ne!(a.id, b.id);
+        assert_eq!(a.id, "contact:ground:6000000000:contact_start:chaser_flight");
+        assert_eq!(a.provenance.as_ref().unwrap().attributes["sender"], "chaser_flight");
+        assert!(a.detail.contains("chaser_flight") && b.detail.contains("target_flight"), "{} / {}", a.detail, b.detail);
+        assert_eq!((a.kind, a.entity_id.as_str(), a.tai_ns), (EventKind::ContactStart as i32, "ground", 6_000_000_000));
+    }
 
     #[test]
     fn lifecycle_pair_has_matching_instance_and_start_before_end() {
