@@ -1822,3 +1822,171 @@ above:
 - **The zero-egress proof kit (`out/kit/proof`) is stale:** it records the edge-plugin image at
   `34d4e440…`, which was re-pinned to `a0af6681…` with an unchanged runtime-content hash. The
   three gated zero-egress tests skip until it is rebuilt.
+
+## Status (native team manager, 2026-10-19) — the RHEL 7 GMAT pin (question 257)
+
+GMAT's RHEL 7 build is pinned as a second Linux x86_64 variant. The Ubuntu build stays the
+default. The installer takes an explicit choice between them.
+
+### What landed on `edge`
+
+| Commit | What |
+|---|---|
+| `4d7d62a` | The pin, the `variants` table, `--gmat-variant` in the installer, the new refusals, and the tests |
+| `ec38d7a` | `docs/kit-operator-supplied.md` and `scripts/kit/README.md`, and a test that keeps the document's Pin column in step with the pins file |
+
+### The pin (task 1)
+
+- **`platforms.linux-x86_64-rhel7`** carries the five fields of the Ubuntu key:
+  - `content_hash` `sha256:3db3afed6d28291932f8ed4d06f20b2df09298b3e02f8a50e156c22b82b3975c`;
+  - 2,043 files, 774,131,578 bytes;
+  - 100 symlinks, listing hash `sha256:041a4fffcbd08b17664951fa02eff53627cff2e256cccafc6299348641bd0a8e`.
+- **Taken from the record, not re-measured.** The archive (`gmat-rhel7-x64-R2026a.tar.gz`, sha256
+  `3262cf77…14cd`) is no longer on this host:
+  - question 254 unpacked both archives under `/Users/probe/gmat-linux-stage/`, which was removed
+    at that round's end under the staging rule;
+  - the native rounds' scratch folders hold only the fetch log and the file listing;
+  - a `find` by name over `/Users/probe` (except `~/Library/CloudStorage`, where a first, unpruned
+    search stalled), `/private/tmp`, `/private/var/folders` and `/Volumes` found neither Linux
+    archive. Colima's VM disk was not searched.
+
+  It was not fetched again (question 154). The values are question 254's
+  `manifest.measure_tree(root, scope)` over the unpacked `GMAT/R2026a`, recorded in that round's
+  `measure-both.log`. That is the same call and scope as the Ubuntu pin. They are equal field by
+  field to the `measured` block the pins file carried.
+- **The archive record** is renamed from `linux-x86_64-rhel7-measured-not-pinned` to
+  `linux-x86_64-rhel7` and marked `pinned: true`. Its `measured` block is gone (the pin is kept
+  once, in `platforms`), and its note says the pin was not re-measured or re-fetched.
+- **`variants`** maps `linux-x86_64` to `{default: ubuntu, pins: {ubuntu: linux-x86_64, rhel7:
+  linux-x86_64-rhel7}}`. `manifest.variant_problems` checks the table:
+  - the default variant's pin is the platform's own key;
+  - every pin is a pinned `platforms` entry;
+  - names are lower-case;
+  - no two variants share a pin;
+  - no chains.
+
+  A bad table is `pins-malformed` / `gmat-pin-malformed`.
+
+### The installer (task 2)
+
+- **`--gmat-variant NAME`**, on the install and on `--check-operator-supplied`. On `linux-x86_64`
+  it defaults to `ubuntu`.
+- **The tree is compared with the chosen variant's pin only.**
+- **`INSTALL_RECORD.installed.operator_supplied.gmat`** gains:
+  - `variant` (`ubuntu` / `rhel7`, or `null` on a platform without variants);
+  - `variant_chosen_by` (`default` / `option` / `null`);
+  - `pin_key`.
+
+  The components list's `detail` carries `variant` and `pin_key`. The printed line reads
+  `verified linux-x86_64 (rhel7) sha256:… 2043 files`.
+- **New refusal codes**, all exit 2 and all before the target directory exists:
+  - `gmat-matches-other-variant`: the tree differs from the chosen pin and equals another variant's
+    pin. The message names the variant it matches, the pin it equals, the chosen variant and how it
+    was chosen, and the option to pass (`--gmat-platform linux-x86_64 --gmat-variant rhel7`).
+  - `gmat-variant-not-applicable`: `--gmat-variant` on a platform with one pin (`macos-arm64`).
+    The tree is not read.
+  - `gmat-variant-unknown`: the name is not a variant of the platform. The message lists the
+    variants and the default.
+  - `gmat-platform-is-a-variant`: `--gmat-platform linux-x86_64-rhel7`. The message names the two
+    options to pass instead.
+- A tree that matches neither pin keeps `gmat-descriptor-differs`, with expected and found.
+- `macos-arm64` without the option behaves as before.
+
+### Tests (task 3, docker-free)
+
+`tests/test_kit_install.py` has 13 new tests and 1 new opt-in test:
+
+- **Fixture.** Three small synthetic trees under the real pins file's own `variants` table and
+  keys: Ubuntu-like, RHEL-7-like and macOS.
+- **Covered:**
+  - the default is Ubuntu, recorded as `default`;
+  - each variant is accepted under its own choice;
+  - each is refused under the other choice with `gmat-matches-other-variant`, both with and
+    without the option;
+  - a tampered tree under each choice gets `gmat-descriptor-differs`;
+  - not-applicable and unknown variants are refused without reading the tree;
+  - a variant key given as the platform is refused;
+  - the root-missing message names the variants;
+  - a malformed table is refused;
+  - an unused variant is recorded;
+  - end to end through `install.install` and `install.main`, the record carries the variant;
+  - the usage text.
+- **Opt-in.** `AV_KIT_MEASURE_GMAT_RHEL7=1 GMAT_RHEL7_ROOT=…` re-measures the real tree.
+
+`tests/test_kit_operator_supplied.py` now also requires two things of the document: each pinned
+archive's row names its pin key in the Pin column, and each variant table's default, names and
+keys appear in the GMAT section.
+
+Each proof was perturbed once, then restored byte for byte:
+
+| Perturbation | Result |
+|---|---|
+| The other-variant branch disabled | 2 failed |
+| The default resolved to `rhel7` in code | 4 failed |
+| The pins file's default set to `rhel7` | 11 failed |
+| The document's RHEL 7 Pin cell set to `none` | 1 failed |
+
+### Docs (task 4)
+
+These now agree:
+
+- `docs/kit-operator-supplied.md`:
+  - the item 3 pin table;
+  - a "Variants" paragraph;
+  - the Linux release table's Pin column;
+  - the RHEL 7 paragraph;
+  - the known-gaps summary;
+  - "To make the kit match" item 2;
+  - the re-measuring line.
+- `scripts/kit/README.md`.
+- `install.py`'s module doc and `--help`.
+- `install.sh`'s usage header.
+
+### Gate (at `ec38d7a`)
+
+- **Kit Python tests** (`tests/test_kit_*.py`, under `cargo-slot --hold`): **292 passed, 16
+  skipped, 0 failed.** Every skip is an opt-in:
+  - the three real-GMAT re-measurements;
+  - `AV_KIT_WITH_IMAGES` / `WITH_VENDOR` / `WITH_WHEELS` / `WITH_BINARIES`;
+  - the zero-egress proof's three tests, which skip because the proof kit is stale (below).
+- **`scripts/kit/regenerate_compliance.py --check`**: "up to date -- a real run would change
+  nothing", exit 0. Nothing in `docs/compliance/` moves.
+- **The zero-egress install proof (question 217) was not run.**
+  - Its three tests skip: `out/kit/proof` records the edge-plugin image at `34d4e440…` and the
+    host has `f8ae0a1e…` (stale since question 254, as recorded above).
+  - Even rebuilt, the proof kit omits `packs.gmat` by design, so the variant path is not on it.
+  - Rebuilding it fetches wheels from PyPI, which this brief does not name.
+- No Rust, proto or web code changed, so the cargo, `buf` and node phases were not run.
+
+### Decisions (numbered, for the lead to ratify)
+
+1. **A separate `--gmat-variant` option**, not a third value of `--gmat-platform`.
+   - The platform stays `<os>-<uname -m>`, which says nothing about the distribution a tree was
+     built for.
+   - `linux-x86_64-rhel7` is a pin key, not a platform. Giving it as `--gmat-platform` is refused
+     (`gmat-platform-is-a-variant`) rather than accepted as an alias, so there is one way to
+     choose a variant.
+2. **The default variant's pin is the platform's own key.** `linux-x86_64` is still the Ubuntu pin,
+   so anything that reads `platforms` alone sees what it saw before:
+   - an earlier installer;
+   - `platforms_matching_this_descriptor` in the builder;
+   - the document tests.
+3. **The other-variant check reuses the one measurement.** It compares `found` with the other
+   variants' pins only after the chosen pin differs. The tree is read once.
+4. **Variant refusals that need no measurement come first** (not-applicable, unknown), in keeping
+   with the existing cheapest-first order.
+5. **The RHEL 7 numbers live once,** in `platforms`. The archive record keeps provenance only.
+6. **`--gmat-variant` on a kit without `packs.gmat`** is recorded as `variant_given_but_unused`,
+   as `--gmat-root` is.
+7. **The pin is question 254's measurement.** Re-measurement needs the archive, which is gone, and
+   the brief forbids a re-fetch.
+
+### Not delivered, and why
+
+1. **No re-measurement of the RHEL 7 tree:** the archive is not on this host. The opt-in test is
+   ready for when an operator supplies the unpacked tree.
+2. **No zero-egress proof run:** above.
+3. **No `--network none` Linux-container run of the installer over the RHEL 7 tree,** as question
+   254 did for Ubuntu. It needs the tree.
+4. **`docs/open-questions.md` is untouched:** question 257 is the charter, and recording the
+   ratification is the lead's.
