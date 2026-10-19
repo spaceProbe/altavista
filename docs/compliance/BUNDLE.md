@@ -40,7 +40,7 @@ rather than a silent hole (see `scripts/kit/evidence.py`'s own top doc, "Bundle 
 ## The bundle's own SHA-256, at this commit
 
 ```
-72945b684ea0f3b39ac2c5412798f7f77044e7cf326dc97159ee6be787945d91
+4ad17a0a5709aab7f3d508e17a0b3190bdaa7b2dd7162a1dc901189cd1efe52d
 ```
 
 Measured by running the command above with no `--kit`/`--ledger-dir` (both offline-declared
@@ -73,6 +73,7 @@ so it is not duplicated here.
 
 | Date | Hash | Commit | Cause |
 |---|---|---|---|
+| 2026-10-19 | `4ad17a0a5709aab7f3d508e17a0b3190bdaa7b2dd7162a1dc901189cd1efe52d` | `f3b2520` | scripts/kit/regenerate_compliance.py: SBOM regeneration changed `av-command.cdx.json`, `av-dynamics-service.cdx.json`, `av-edge-plugin.cdx.json`, `av-gateway.cdx.json`, `av-ingest.cdx.json`, `av-proposer.cdx.json`, `cfs-image.cdx.json`, `edge-plugin-image.cdx.json`. |
 | 2026-10-17 | `72945b684ea0f3b39ac2c5412798f7f77044e7cf326dc97159ee6be787945d91` | `90980fb` | scripts/kit/regenerate_compliance.py: SBOM regeneration changed `av-command.cdx.json`, `av-dynamics-service.cdx.json`, `av-edge-plugin.cdx.json`, `av-gateway.cdx.json`, `av-ingest.cdx.json`, `av-proposer.cdx.json`, `av-viewer.cdx.json`, `cfs-image.cdx.json`, `edge-plugin-image.cdx.json`, `gmat-service.cdx.json`. |
 | 2026-10-17 | `71572023fcda8bb0e2236466b15fc353c7193b6760bcc07af6b750a95e47615f` | `5a46823` | scripts/kit/regenerate_compliance.py: SBOM regeneration changed `av-command.cdx.json`, `av-dynamics-service.cdx.json`, `av-edge-plugin.cdx.json`, `av-gateway.cdx.json`, `av-ingest.cdx.json`, `av-proposer.cdx.json`, `cfs-image.cdx.json`, `edge-plugin-image.cdx.json`. |
 | 2026-10-09 | `6e47c3e60ac1b83d271a2f38e48163e0762a1384550f2f315dc51e01eab18be0` | `f7c3440` | scripts/kit/regenerate_compliance.py: SBOM regeneration changed `av-command.cdx.json`, `av-dynamics-service.cdx.json`, `av-edge-plugin.cdx.json`, `av-gateway.cdx.json`, `av-ingest.cdx.json`, `av-proposer.cdx.json`, `cfs-image.cdx.json`, `edge-plugin-image.cdx.json`. |
