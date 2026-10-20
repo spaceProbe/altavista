@@ -90,6 +90,7 @@ pub fn hermite_velocity(t0_ns: i64, s0: &[f64], t1_ns: i64, s1: &[f64], t_ns: i6
 // Classification and general interpolation by declared StateSpace (ADR-005 sec 3).
 // ---------------------------------------------------------------------------------------
 
+use av_dynamics::math;
 use av_cdm::pb::{StateComponent, StateSpace, Unit};
 
 /// Labels/units this module recognizes as the six-component Cartesian position/velocity
@@ -307,11 +308,11 @@ pub fn slerp_xyzw(q0: [f64; 4], q1_in: [f64; 4], s: f64) -> [f64; 4] {
         }
         return normalize4(out);
     }
-    let theta0 = dot.acos();
-    let sin_theta0 = theta0.sin();
+    let theta0 = math::acos(dot);
+    let sin_theta0 = math::sin(theta0);
     let theta = theta0 * s;
-    let a = (theta0 - theta).sin() / sin_theta0;
-    let b = theta.sin() / sin_theta0;
+    let a = math::sin(theta0 - theta) / sin_theta0;
+    let b = math::sin(theta) / sin_theta0;
     let mut out = [0.0; 4];
     for i in 0..4 {
         out[i] = a * q0[i] + b * q1[i];

@@ -121,6 +121,7 @@
 //! row itself -- this module never guesses the day-offset/slot-selection convention GMAT's
 //! own (unavailable) `SolarFluxReader` implements.
 
+use av_dynamics::math;
 use crate::frame::BodyFixedRotation;
 
 /// Every way this module's functions can fail. Typed throughout -- no panic on any input a
@@ -275,20 +276,20 @@ fn check_finite3(p: [f64; 3]) -> bool {
 /// geodetic_latitude_rad)`.
 pub fn geodetic_height_lat_km(r_body_fixed_km: [f64; 3], cb: &CentralBodyGeodetics) -> (f64, f64) {
     let rxy = (r_body_fixed_km[0] * r_body_fixed_km[0] + r_body_fixed_km[1] * r_body_fixed_km[1]).sqrt();
-    let mut geo_lat = r_body_fixed_km[2].atan2(rxy);
+    let mut geo_lat = math::atan2(r_body_fixed_km[2], rxy);
     let ecc2 = cb.flattening * (2.0 - cb.flattening);
     let geodetic_tolerance = 1.0e-7;
     let mut delta = 1.0_f64;
     while delta > geodetic_tolerance {
         let oldlat = geo_lat;
-        let sinlat = oldlat.sin();
+        let sinlat = math::sin(oldlat);
         let c_factor = cb.equatorial_radius_km / (1.0 - ecc2 * sinlat * sinlat).sqrt();
-        geo_lat = (r_body_fixed_km[2] + c_factor * ecc2 * sinlat).atan2(rxy);
+        geo_lat = math::atan2(r_body_fixed_km[2] + c_factor * ecc2 * sinlat, rxy);
         delta = (geo_lat - oldlat).abs();
     }
-    let sinlat = geo_lat.sin();
+    let sinlat = math::sin(geo_lat);
     let c_factor = cb.equatorial_radius_km / (1.0 - ecc2 * sinlat * sinlat).sqrt();
-    let height = rxy / geo_lat.cos() - c_factor;
+    let height = rxy / math::cos(geo_lat) - c_factor;
     (height, geo_lat)
 }
 
@@ -411,7 +412,7 @@ pub fn exotherm(r_sc_km: [f64; 3], r_sun_km: [f64; 3], kp: f64, xtemp_k: f64, he
     } else if cos_alpha <= -1.0 + error_tolerance {
         ((r_sun_km[0] * r_sc_km[1] - r_sun_km[1] * r_sc_km[0]) / cross_denom) * std::f64::consts::PI
     } else {
-        ((r_sun_km[0] * r_sc_km[1] - r_sun_km[1] * r_sc_km[0]) / cross_denom) * cos_alpha.clamp(-1.0, 1.0).acos()
+        ((r_sun_km[0] * r_sc_km[1] - r_sun_km[1] * r_sc_km[0]) / cross_denom) * math::acos(cos_alpha.clamp(-1.0, 1.0))
     };
 
     let sun_dec = geom.sun_dec_rad;
@@ -419,18 +420,18 @@ pub fn exotherm(r_sc_km: [f64; 3], r_sun_km: [f64; 3], kp: f64, xtemp_k: f64, he
 
     let theta = 0.5 * (geo_lat + sun_dec).abs();
     let eta = 0.5 * (geo_lat - sun_dec).abs();
-    let mut tau = hour_angle - 0.645_771_823_25 + 0.104_719_755_12 * (hour_angle + 0.750_491_578_36).sin();
+    let mut tau = hour_angle - 0.645_771_823_25 + 0.104_719_755_12 * math::sin(hour_angle + 0.750_491_578_36);
     if tau < -std::f64::consts::PI {
         tau += 2.0 * std::f64::consts::PI;
     } else if tau > std::f64::consts::PI {
         tau -= 2.0 * std::f64::consts::PI;
     }
-    let th22 = theta.sin().powf(2.2);
-    let t1 = xtemp_k * (1.0 + 0.3 * (th22 + (0.5 * tau).cos().powi(3) * (eta.cos().powf(2.2) - th22)));
-    let expkp = kp.exp();
+    let th22 = math::powf(math::sin(theta), 2.2);
+    let t1 = xtemp_k * (1.0 + 0.3 * (th22 + math::cos(0.5 * tau).powi(3) * (math::powf(math::cos(eta), 2.2) - th22)));
+    let expkp = math::exp(kp);
 
     let t_infinity = if height_km < 200.0 { t1 + 14.0 * kp + 0.02 * expkp } else { t1 + 28.0 * kp + 0.03 * expkp };
-    let tx = 371.6678 + 0.0518806 * t_infinity - 294.3505 * (-0.00216222 * t_infinity).exp();
+    let tx = 371.6678 + 0.0518806 * t_infinity - 294.3505 * math::exp(-0.00216222 * t_infinity);
 
     let exotemp;
     let mut sum_con_l = 0.0;
@@ -446,7 +447,7 @@ pub fn exotherm(r_sc_km: [f64; 3], r_sun_km: [f64; 3], kp: f64, xtemp_k: f64, he
             sum = CON_L[i] + sum * t_infinity;
         }
         sum_con_l = sum;
-        exotemp = t_infinity - (t_infinity - tx) * (-(tx - TZERO) / (t_infinity - tx) * (height_km - 125.0) / 35.0 * sum / (cb.polar_radius_km() + height_km)).exp();
+        exotemp = t_infinity - (t_infinity - tx) * math::exp(-(tx - TZERO) / (t_infinity - tx) * (height_km - 125.0) / 35.0 * sum / (cb.polar_radius_km() + height_km));
     } else {
         exotemp = tx;
     }
@@ -525,14 +526,14 @@ pub fn rho_100(height_km: f64, exo: &ExothermResult, cb: &CentralBodyGeodetics) 
     let p1 = b[5] - 2.0 * p4 - p3 - p2;
     let p6 = b[4] + b[5] * (2.0 * exo.x_root + exo.root1 + exo.root2 - cb_polar_km) - p5 - 2.0 * (exo.x_root + cb_polar_km) * p4 - (exo.root2 + cb_polar_km) * p3 - (exo.root1 + cb_polar_km) * p2;
 
-    let log_f1 = p1 * ((height_km + cb_polar_km) / (90.0 + cb_polar_km)).ln() + p2 * ((height_km - exo.root1) / (90.0 - exo.root1)).ln() + p3 * ((height_km - exo.root2) / (90.0 - exo.root2)).ln()
-        + p4 * ((height_km * height_km - 2.0 * exo.x_root * height_km + rf.roots_2) / (8100.0 - 180.0 * exo.x_root + rf.roots_2)).ln();
+    let log_f1 = p1 * math::ln((height_km + cb_polar_km) / (90.0 + cb_polar_km)) + p2 * math::ln((height_km - exo.root1) / (90.0 - exo.root1)) + p3 * math::ln((height_km - exo.root2) / (90.0 - exo.root2))
+        + p4 * math::ln((height_km * height_km - 2.0 * exo.x_root * height_km + rf.roots_2) / (8100.0 - 180.0 * exo.x_root + rf.roots_2));
     let f2 = (height_km - 90.0) * (M_CON[6] + p5 / ((height_km + cb_polar_km) * (90.0 + cb_polar_km)))
-        + p6 * (exo.y_root * (height_km - 90.0) / (exo.y_root * exo.y_root + (height_km - exo.x_root) * (90.0 - exo.x_root))).atan() / exo.y_root;
+        + p6 * math::atan(exo.y_root * (height_km - 90.0) / (exo.y_root * exo.y_root + (height_km - exo.x_root) * (90.0 - exo.x_root))) / exo.y_root;
 
     let factor_k = -G_ZERO / (GAS_CON * (exo.tx - TZERO));
 
-    RHO_ZERO * TZERO * m_poly * (factor_k * (log_f1 + f2)).exp() / (MZERO * exo.exotemp)
+    RHO_ZERO * TZERO * m_poly * math::exp(factor_k * (log_f1 + f2)) / (MZERO * exo.exotemp)
 }
 
 /// `JacchiaRobertsAtmosphere::rho_125`: raw density (g/cm^3) between 100 and 125 km, ported
@@ -550,17 +551,17 @@ pub fn rho_125(height_km: f64, exo: &ExothermResult, cb: &CentralBodyGeodetics) 
     let q1 = -2.0 * q4 - q3 - q2;
     let q6 = -q5 - 2.0 * (exo.x_root + cb_polar_km) * q4 - (exo.root2 + cb_polar_km) * q3 - (exo.root1 + cb_polar_km) * q2;
 
-    let log_f3 = q1 * ((height_km + cb_polar_km) / (100.0 + cb_polar_km)).ln() + q2 * ((height_km - exo.root1) / (100.0 - exo.root1)).ln() + q3 * ((height_km - exo.root2) / (100.0 - exo.root2)).ln()
-        + q4 * ((height_km * height_km - 2.0 * exo.x_root * height_km + rf.roots_2) / (1.0e4 - 200.0 * exo.x_root + rf.roots_2)).ln();
-    let f4 = (height_km - 100.0) * q5 / ((height_km + cb_polar_km) * (100.0 + cb_polar_km)) + q6 * (exo.y_root * (height_km - 100.0) / (exo.y_root * exo.y_root + (height_km - exo.x_root) * (100.0 - exo.x_root))).atan() / exo.y_root;
+    let log_f3 = q1 * math::ln((height_km + cb_polar_km) / (100.0 + cb_polar_km)) + q2 * math::ln((height_km - exo.root1) / (100.0 - exo.root1)) + q3 * math::ln((height_km - exo.root2) / (100.0 - exo.root2))
+        + q4 * math::ln((height_km * height_km - 2.0 * exo.x_root * height_km + rf.roots_2) / (1.0e4 - 200.0 * exo.x_root + rf.roots_2));
+    let f4 = (height_km - 100.0) * q5 / ((height_km + cb_polar_km) * (100.0 + cb_polar_km)) + q6 * math::atan(exo.y_root * (height_km - 100.0) / (exo.y_root * exo.y_root + (height_km - exo.x_root) * (100.0 - exo.x_root))) / exo.y_root;
 
     let factor_k = -1_500_625.0 * G_ZERO * cb_polar_km * cb_polar_km / (GAS_CON * CON_C[4] * (exo.tx - TZERO));
 
     let mut rho_sum = 0.0;
     for i in 0..=4 {
-        let mut rhoi = MOL_MASS[i] * NUM_DENS[i] * (MOL_MASS[i] * factor_k * (f4 + log_f3)).exp();
+        let mut rhoi = MOL_MASS[i] * NUM_DENS[i] * math::exp(MOL_MASS[i] * factor_k * (f4 + log_f3));
         if i == 2 {
-            rhoi *= (t_100 / exo.exotemp).powf(-0.38);
+            rhoi *= math::powf(t_100 / exo.exotemp, -0.38);
         }
         rho_sum += rhoi;
     }
@@ -574,20 +575,20 @@ pub fn rho_125(height_km: f64, exo: &ExothermResult, cb: &CentralBodyGeodetics) 
 /// for why that sub-minute difference is negligible for this correction's own ~365-day
 /// period).
 pub fn rho_cor(height_km: f64, gmat_mjd_days: f64, geo_lat_rad: f64, kp: f64) -> f64 {
-    let geo_cor = if height_km < 200.0 { 0.012 * kp + 0.000012 * kp.exp() } else { 0.0 };
+    let geo_cor = if height_km < 200.0 { 0.012 * kp + 0.000012 * math::exp(kp) } else { 0.0 };
 
-    let f = (5.876e-7 * height_km.powf(2.331) + 0.06328) * (-0.002868 * height_km).exp();
+    let f = (5.876e-7 * math::powf(height_km, 2.331) + 0.06328) * math::exp(-0.002868 * height_km);
     let day_58 = (gmat_mjd_days - 6204.5) / 365.2422;
-    let tausa = day_58 + 0.09544 * ((0.5 * (1.0 + (2.0 * std::f64::consts::PI * day_58 + 6.035).sin())).powf(1.65) - 0.5);
-    let alpha = (4.0 * std::f64::consts::PI * tausa + 4.259).sin();
-    let g = 0.02835 + (0.3817 + 0.17829 * (2.0 * std::f64::consts::PI * tausa + 4.137).sin()) * alpha;
+    let tausa = day_58 + 0.09544 * (math::powf(0.5 * (1.0 + math::sin(2.0 * std::f64::consts::PI * day_58 + 6.035)), 1.65) - 0.5);
+    let alpha = math::sin(4.0 * std::f64::consts::PI * tausa + 4.259);
+    let g = 0.02835 + (0.3817 + 0.17829 * math::sin(2.0 * std::f64::consts::PI * tausa + 4.137)) * alpha;
     let semian_cor = f * g;
 
-    let sin_lat = geo_lat_rad.sin();
-    let eta_lat = (2.0 * std::f64::consts::PI * day_58 + 1.72).sin() * sin_lat * sin_lat.abs();
-    let slat_cor = 0.014 * (height_km - 90.0) * eta_lat * (-0.0013 * (height_km - 90.0) * (height_km - 90.0)).exp();
+    let sin_lat = math::sin(geo_lat_rad);
+    let eta_lat = math::sin(2.0 * std::f64::consts::PI * day_58 + 1.72) * sin_lat * sin_lat.abs();
+    let slat_cor = 0.014 * (height_km - 90.0) * eta_lat * math::exp(-0.0013 * (height_km - 90.0) * (height_km - 90.0));
 
-    10.0_f64.powf(geo_cor + semian_cor + slat_cor)
+    math::powf(10.0_f64, geo_cor + semian_cor + slat_cor)
 }
 
 /// `JacchiaRobertsAtmosphere::rho_high`'s own SIX per-constituent partial densities (g/cm^3,
@@ -607,7 +608,7 @@ pub fn rho_high_species_terms(height_km: f64, exo: &ExothermResult, t_500_k: f64
         let mut di = 0.0;
         if i <= 4 {
             let log_di = eval_poly_desc(&CON_DEN[i], exo.t_infinity);
-            di = 10.0_f64.powf(log_di) / AVOGADRO;
+            di = math::powf(10.0_f64, log_di) / AVOGADRO;
         }
         let polar125 = cb_polar_km + 125.0;
         let gamma = 35.0 * MOL_MASS[i] * G_ZERO * cb_polar_km * cb_polar_km * (exo.t_infinity - exo.tx) / (GAS_CON * exo.sum_con_l * exo.t_infinity * (exo.tx - TZERO) * polar125);
@@ -616,13 +617,13 @@ pub fn rho_high_species_terms(height_km: f64, exo: &ExothermResult, t_500_k: f64
         if i == 2 {
             exp1 -= 0.38;
             let sign = if sun_dec_rad >= 0.0 { 1.0 } else { -1.0 };
-            f = 4.9914 * sun_dec_rad.abs() * ((0.25 * std::f64::consts::PI - 0.5 * geo_lat_rad * sign).sin().powi(3) - 0.35355) / std::f64::consts::PI;
-            f = 10.0_f64.powf(f);
+            f = 4.9914 * sun_dec_rad.abs() * (math::sin(0.25 * std::f64::consts::PI - 0.5 * geo_lat_rad * sign).powi(3) - 0.35355) / std::f64::consts::PI;
+            f = math::powf(10.0_f64, f);
         }
         if height_km > 500.0 && i == 5 {
-            terms[i] = MOL_MASS[5] * 10.0_f64.powf(73.13 - (39.4 - 5.5 * t_500_k.log10()) * t_500_k.log10()) * (t_500_k / exo.exotemp).powf(exp1) * ((exo.t_infinity - exo.exotemp) / (exo.t_infinity - t_500_k)).powf(gamma) / AVOGADRO;
+            terms[i] = MOL_MASS[5] * math::powf(10.0_f64, 73.13 - (39.4 - 5.5 * math::log10(t_500_k)) * math::log10(t_500_k)) * math::powf(t_500_k / exo.exotemp, exp1) * math::powf((exo.t_infinity - exo.exotemp) / (exo.t_infinity - t_500_k), gamma) / AVOGADRO;
         } else if i <= 4 {
-            terms[i] = f * MOL_MASS[i] * di * (exo.tx / exo.exotemp).powf(exp1) * ((exo.t_infinity - exo.exotemp) / (exo.t_infinity - exo.tx)).powf(gamma);
+            terms[i] = f * MOL_MASS[i] * di * math::powf(exo.tx / exo.exotemp, exp1) * math::powf((exo.t_infinity - exo.exotemp) / (exo.t_infinity - exo.tx), gamma);
         }
     }
     terms
@@ -716,7 +717,7 @@ pub fn density_kg_m3<R: BodyFixedRotation>(r_sc_m: [f64; 3], r_sun_m: [f64; 3], 
     // sun_dec, computed ONCE (GMAT's own JacchiaRoberts() computes it once per Density() call
     // and passes it unchanged into every exotherm call -- see exotherm's own doc comment),
     // from the un-rotated Sun vector.
-    let sun_dec_rad = r_sun_km[2].atan2((r_sun_km[0] * r_sun_km[0] + r_sun_km[1] * r_sun_km[1]).sqrt());
+    let sun_dec_rad = math::atan2(r_sun_km[2], (r_sun_km[0] * r_sun_km[0] + r_sun_km[1] * r_sun_km[1]).sqrt());
 
     let raw_g_cm3 = raw_density_g_cm3(height_km, r_sc_km, r_sun_km, kp, xtemp_k, SunGeometry { sun_dec_rad, geo_lat_rad }, cb)?;
 

@@ -144,6 +144,7 @@
 //! (`executor::execute`, for a `Scenario` built directly, bypassing the loader), the same
 //! "validated once, callable from either entry point" shape [`parse`] itself already has.
 
+use av_dynamics::math;
 use std::collections::BTreeMap;
 
 use av_cdm::pb::{AxesKind, ManeuverExecutionError, ScenarioEvent};
@@ -357,8 +358,8 @@ pub fn dv_to_inertial(axes: AxesKind, dv: [f64; 3], r: [f64; 3], v: [f64; 3]) ->
 /// `(0.0, 0.0)` regardless of `v` -- the zero-sigma case that must reproduce a perfect burn
 /// exactly.
 pub fn gates_sigmas(ee: &ParsedExecutionError, v: f64) -> (f64, f64) {
-    let sigma_m = ee.sigma_magnitude_fixed_mps.hypot(ee.sigma_magnitude_proportional * v);
-    let sigma_p = ee.sigma_pointing_fixed_mps.hypot(ee.sigma_pointing_proportional_rad * v);
+    let sigma_m = math::hypot(ee.sigma_magnitude_fixed_mps, ee.sigma_magnitude_proportional * v);
+    let sigma_p = math::hypot(ee.sigma_pointing_fixed_mps, ee.sigma_pointing_proportional_rad * v);
     (sigma_m, sigma_p)
 }
 

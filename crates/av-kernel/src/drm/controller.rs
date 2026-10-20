@@ -79,6 +79,7 @@
 //! `std::error::Error`-implementing types wired into `super::binding::AnyModelError::PortCodec`,
 //! never a panic or a silently-substituted default.
 
+use av_dynamics::math;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -643,7 +644,7 @@ impl DynamicsModel for AttitudeControllerModel {
         if let Some(q) = *self.last_star_q.borrow() {
             let qv = signed_error_vector(self.spec.target_q, q);
             let vnorm = (qv[0] * qv[0] + qv[1] * qv[1] + qv[2] * qv[2]).sqrt().clamp(-1.0, 1.0);
-            outputs.insert("pointing_error_rad".to_string(), 2.0 * vnorm.asin());
+            outputs.insert("pointing_error_rad".to_string(), 2.0 * math::asin(vnorm));
         }
         // A3.1/D3/D4: "acknowledged by the flight software's telemetry" -- mirrors
         // `ConstantAccelModel::step_with_ports`'s own identical `ack_framed` emission, extended

@@ -113,6 +113,7 @@
 //! unit-tests under `cargo test -p av-orbital --no-default-features`) and returns [`MsiseError`]
 //! rather than panicking on any input a DRM could supply.
 
+use av_dynamics::math;
 use crate::frame::BodyFixedRotation;
 use crate::jacchia_roberts::{geodetic_height_lat_km, CentralBodyGeodetics, WeatherInputs};
 use crate::msise90_data::{LOWER6, PARM6};
@@ -234,13 +235,13 @@ pub fn kp_to_ap(kp: f64) -> f64 {
 fn apdf_daily(ap_daily: f64, p44_raw: f64, p45: f64) -> f64 {
     let apd = ap_daily - 4.0;
     let p44 = if p44_raw < 0.0 { 1e-5 } else { p44_raw };
-    apd + (p45 - 1.0) * (apd + ((-p44 * apd).exp() - 1.0) / p44)
+    apd + (p45 - 1.0) * (apd + (math::exp(-p44 * apd) - 1.0) / p44)
 }
 
 /// GMAT's own `glatf_`: latitude-variable gravity (cm/s^2) and effective Earth radius (km) --
 /// ported unchanged.
 fn glatf(lat_deg: f64) -> (f64, f64) {
-    let c2 = (2.0 * DGTR * lat_deg).cos();
+    let c2 = math::cos(2.0 * DGTR * lat_deg);
     let gv = (1.0 - c2 * 0.0026373) * 980.616;
     let reff = gv * 2.0 / (c2 * 2.27e-9 + 3.085462e-6) * 1e-5;
     (gv, reff)
@@ -374,16 +375,16 @@ fn glob6s(geo: &Geophysical, apdf: f64, parr: &[f64]) -> f64 {
     let f107a = geo.f107a;
     let p = |i: usize| parr[i - 1];
     let plg = legendre(geo.lat_deg);
-    let (stloc, ctloc) = (HR * tloc).sin_cos();
-    let (s2tloc, c2tloc) = (HR * 2.0 * tloc).sin_cos();
-    let (s3tloc, c3tloc) = (HR * 3.0 * tloc).sin_cos();
-    let clong = (DGTR * long_deg).cos();
-    let slong = (DGTR * long_deg).sin();
+    let (stloc, ctloc) = math::sin_cos(HR * tloc);
+    let (s2tloc, c2tloc) = math::sin_cos(HR * 2.0 * tloc);
+    let (s3tloc, c3tloc) = math::sin_cos(HR * 3.0 * tloc);
+    let clong = math::cos(DGTR * long_deg);
+    let slong = math::sin(DGTR * long_deg);
     let dfa = f107a - 150.0;
-    let cd32 = (DR * (day - p(32))).cos();
-    let cd18 = (DR * 2.0 * (day - p(18))).cos();
-    let cd14 = (DR * (day - p(14))).cos();
-    let cd39 = (DR * 2.0 * (day - p(39))).cos();
+    let cd32 = math::cos(DR * (day - p(32)));
+    let cd18 = math::cos(DR * 2.0 * (day - p(18)));
+    let cd14 = math::cos(DR * (day - p(14)));
+    let cd39 = math::cos(DR * 2.0 * (day - p(39)));
 
     let mut t = [0.0_f64; 14];
     t[0] = p(22) * dfa;
@@ -408,7 +409,7 @@ fn glob6s(geo: &Geophysical, apdf: f64, parr: &[f64]) -> f64 {
     t[8] = apdf * (p(33) + p(46) * plg[2]);
 
     // LONGITUDINAL (SW(9), SW(10) always on; `long > -1000` always).
-    t[10] = (plg[1] * (p(81) * (DR * (day - p(82))).cos() + p(86) * (DR * 2.0 * (day - p(87))).cos()) + 1.0 + p(84) * (DR * (day - p(85))).cos() + p(88) * (DR * 2.0 * (day - p(89))).cos())
+    t[10] = (plg[1] * (p(81) * math::cos(DR * (day - p(82))) + p(86) * math::cos(DR * 2.0 * (day - p(87)))) + 1.0 + p(84) * math::cos(DR * (day - p(85))) + p(88) * math::cos(DR * 2.0 * (day - p(89))))
         * ((p(65) * plg[11] + p(66) * plg[13] + p(67) * plg[15] + p(75) * plg[10] + p(76) * plg[12] + p(77) * plg[14]) * clong + (p(91) * plg[11] + p(92) * plg[13] + p(93) * plg[15] + p(78) * plg[10] + p(79) * plg[12] + p(80) * plg[14]) * slong);
 
     t.iter().sum::<f64>()
@@ -467,8 +468,8 @@ fn utc_mjd_1941(t_tai_ns: i64) -> f64 {
 /// the `p(k)` helper [`globe6`] uses for its own POINTER-adjusted `p` parameter).
 fn legendre(lat_deg: f64) -> [f64; 36] {
     let mut plg = [0.0_f64; 36];
-    let c = (lat_deg * DGTR).sin();
-    let s = (lat_deg * DGTR).cos();
+    let c = math::sin(lat_deg * DGTR);
+    let s = math::cos(lat_deg * DGTR);
     let c2 = c * c;
     let c4 = c2 * c2;
     let s2 = s * s;
@@ -509,15 +510,15 @@ fn globe6(geo: &Geophysical, parr: &[f64]) -> f64 {
     let Geophysical { day, sec, lat_deg, long_deg, tloc, f107a, f107, ap_daily } = *geo;
     let p = |i: usize| parr[i - 1];
     let plg = legendre(lat_deg);
-    let (stloc, ctloc) = (HR * tloc).sin_cos();
-    let (s2tloc, c2tloc) = (HR * 2.0 * tloc).sin_cos();
-    let (s3tloc, c3tloc) = (HR * 3.0 * tloc).sin_cos();
-    let clong = (DGTR * long_deg).cos();
-    let slong = (DGTR * long_deg).sin();
-    let cd14 = (DR * (day - p(14))).cos();
-    let cd18 = (DR * 2.0 * (day - p(18))).cos();
-    let cd32 = (DR * (day - p(32))).cos();
-    let cd39 = (DR * 2.0 * (day - p(39))).cos();
+    let (stloc, ctloc) = math::sin_cos(HR * tloc);
+    let (s2tloc, c2tloc) = math::sin_cos(HR * 2.0 * tloc);
+    let (s3tloc, c3tloc) = math::sin_cos(HR * 3.0 * tloc);
+    let clong = math::cos(DGTR * long_deg);
+    let slong = math::sin(DGTR * long_deg);
+    let cd14 = math::cos(DR * (day - p(14)));
+    let cd18 = math::cos(DR * 2.0 * (day - p(18)));
+    let cd32 = math::cos(DR * (day - p(32)));
+    let cd39 = math::cos(DR * 2.0 * (day - p(39)));
 
     let df = f107 - f107a;
     let dfa = f107a - 150.0;
@@ -544,7 +545,7 @@ fn globe6(geo: &Geophysical, parr: &[f64]) -> f64 {
     // MAGNETIC ACTIVITY BASED ON DAILY AP (SW(9) = +1 always -- see this module's own doc
     // comment, "AP: a single scalar").
     let apdf = apdf_daily(ap_daily, p(44), p(45));
-    t[8] = apdf * (p(33) + p(46) * plg[2] + p(35) * plg[4] + (p(101) * plg[1] + p(102) * plg[3] + p(103) * plg[5]) * cd14 + (p(122) * plg[10] + p(123) * plg[12] + p(124) * plg[14]) * (HR * (tloc - p(125))).cos());
+    t[8] = apdf * (p(33) + p(46) * plg[2] + p(35) * plg[4] + (p(101) * plg[1] + p(102) * plg[3] + p(103) * plg[5]) * cd14 + (p(122) * plg[10] + p(123) * plg[12] + p(124) * plg[14]) * math::cos(HR * (tloc - p(125))));
 
     // LONGITUDINAL, UT AND MIXED UT/LONG, UT/LONG MAGNETIC ACTIVITY -- SW(10) is always on and
     // `long > -1000` always (real geodetic longitude, never GMAT's own sentinel), so these are
@@ -554,12 +555,12 @@ fn globe6(geo: &Geophysical, parr: &[f64]) -> f64 {
         * ((p(65) * plg[11] + p(66) * plg[13] + p(67) * plg[15] + p(104) * plg[10] + p(105) * plg[12] + p(106) * plg[14] + (p(110) * plg[10] + p(111) * plg[12] + p(112) * plg[14]) * cd14) * clong
             + (p(91) * plg[11] + p(92) * plg[13] + p(93) * plg[15] + p(107) * plg[10] + p(108) * plg[12] + p(109) * plg[14] + (p(113) * plg[10] + p(114) * plg[12] + p(115) * plg[14]) * cd14) * slong);
 
-    t[11] = (p(96) * plg[1] + 1.0) * (p(82) * dfa + 1.0) * (p(120) * plg[1] * cd14 + 1.0) * ((p(69) * plg[1] + p(70) * plg[3] + p(71) * plg[5]) * (SR * (sec - p(72))).cos());
-    t[11] += (p(77) * plg[21] + p(78) * plg[23] + p(79) * plg[25]) * (SR * (sec - p(80)) + DGTR * 2.0 * long_deg).cos() * (p(138) * dfa + 1.0);
+    t[11] = (p(96) * plg[1] + 1.0) * (p(82) * dfa + 1.0) * (p(120) * plg[1] * cd14 + 1.0) * ((p(69) * plg[1] + p(70) * plg[3] + p(71) * plg[5]) * math::cos(SR * (sec - p(72))));
+    t[11] += (p(77) * plg[21] + p(78) * plg[23] + p(79) * plg[25]) * math::cos(SR * (sec - p(80)) + DGTR * 2.0 * long_deg) * (p(138) * dfa + 1.0);
 
-    t[12] = apdf * (p(121) * plg[1] + 1.0) * ((p(61) * plg[11] + p(62) * plg[13] + p(63) * plg[15]) * (DGTR * (long_deg - p(64))).cos())
-        + apdf * (p(116) * plg[10] + p(117) * plg[12] + p(118) * plg[14]) * cd14 * (DGTR * (long_deg - p(119))).cos()
-        + apdf * (p(84) * plg[1] + p(85) * plg[3] + p(86) * plg[5]) * (SR * (sec - p(76))).cos();
+    t[12] = apdf * (p(121) * plg[1] + 1.0) * ((p(61) * plg[11] + p(62) * plg[13] + p(63) * plg[15]) * math::cos(DGTR * (long_deg - p(64))))
+        + apdf * (p(116) * plg[10] + p(117) * plg[12] + p(118) * plg[14]) * cd14 * math::cos(DGTR * (long_deg - p(119)))
+        + apdf * (p(84) * plg[1] + p(85) * plg[3] + p(86) * plg[5]) * math::cos(SR * (sec - p(76)));
 
     p(31) + t.iter().sum::<f64>()
 }
@@ -615,7 +616,7 @@ fn densu(alt_km: f64, dlb: f64, xm: f64, alpha: f64, ctx: &DensuContext) -> f64 
     let za = ctx.za;
     let z = alt_km.max(za);
     let zg2 = (z - ctx.zlb) * (ctx.re + ctx.zlb) / (ctx.re + z);
-    let tt = ctx.tinf - (ctx.tinf - ctx.tlb) * (-ctx.s2 * zg2).exp();
+    let tt = ctx.tinf - (ctx.tinf - ctx.tlb) * math::exp(-ctx.s2 * zg2);
     let ta = tt;
     let mut tz = tt;
 
@@ -653,11 +654,11 @@ fn densu(alt_km: f64, dlb: f64, xm: f64, alpha: f64, ctx: &DensuContext) -> f64 
 
     let glb = ctx.gsurf / (ctx.zlb / ctx.re + 1.0).powi(2);
     let gamma = xm * glb / (ctx.s2 * RGAS * ctx.tinf);
-    let mut expl = (-ctx.s2 * gamma * zg2).exp();
+    let mut expl = math::exp(-ctx.s2 * gamma * zg2);
     if expl > 50.0 || tt <= 0.0 {
         expl = 50.0;
     }
-    let mut densa = dlb * (ctx.tlb / tt).powf(alpha + 1.0 + gamma) * expl;
+    let mut densa = dlb * math::powf(ctx.tlb / tt, alpha + 1.0 + gamma) * expl;
     if alt_km >= za {
         return densa;
     }
@@ -671,7 +672,7 @@ fn densu(alt_km: f64, dlb: f64, xm: f64, alpha: f64, ctx: &DensuContext) -> f64 
     if expl2 > 50.0 || tz <= 0.0 {
         expl2 = 50.0;
     }
-    densa *= (t1 / tz).powf(alpha + 1.0) * (-expl2).exp();
+    densa *= math::powf(t1 / tz, alpha + 1.0) * math::exp(-expl2);
     densa
 }
 
@@ -694,14 +695,14 @@ fn dnet(dd_in: f64, dm: f64, zhm: f64, xmm: f64, xm: f64) -> f64 {
             return dm;
         }
     }
-    let ylog = a * (dm / dd).ln();
+    let ylog = a * math::ln(dm / dd);
     if ylog < -10.0 {
         return dd;
     }
     if ylog > 10.0 {
         return dm;
     }
-    dd * (ylog.exp() + 1.0).powf(1.0 / a)
+    dd * math::powf(math::exp(ylog) + 1.0, 1.0 / a)
 }
 
 /// GMAT's own `CCOR`: chemistry/dissociation correction, ported unchanged.
@@ -712,9 +713,9 @@ fn ccor(alt: f64, r: f64, h1: f64, zh: f64) -> f64 {
     } else if e < -70.0 {
         r
     } else {
-        r / (e.exp() + 1.0)
+        r / (math::exp(e) + 1.0)
     };
-    ret.exp()
+    math::exp(ret)
 }
 
 /// This vehicle's central-body geodetic parameters and this call's resolved weather -- see
@@ -754,12 +755,12 @@ fn gts6_mass48(alt_km: f64, geo: &Geophysical, gsurf: f64, re: f64) -> Gts6Resul
     let mut d = [0.0_f64; 8];
 
     // Turbopause height variation (SW(5) always on).
-    let zhf = pdl()[49] * (pdl()[24] * (DGTR * geo.lat_deg).sin() * (DR * (geo.day - pt()[13])).cos() + 1.0);
+    let zhf = pdl()[49] * (pdl()[24] * math::sin(DGTR * geo.lat_deg) * math::cos(DR * (geo.day - pt()[13])) + 1.0);
 
     // **** N2 DENSITY **** (always computed first -- MASS==48 bypasses gtd6_'s own early
     // "alt > altl(6)" skip, per `msise90_sub.c`'s own `if (*mass != 28 && *mass != 48)` guard).
     let g28 = g(&pd()[300..450]);
-    let db28 = pdm()[20] * g28.exp() * pd()[300];
+    let db28 = pdm()[20] * math::exp(g28) * pd()[300];
     d[2] = densu(alt_km, db28, 28.0, 0.0, &ctx);
     let zh28 = pdm()[22] * zhf;
     let zhm28 = pdm()[23] * pdl()[30];
@@ -772,14 +773,14 @@ fn gts6_mass48(alt_km: f64, geo: &Geophysical, gsurf: f64, re: f64) -> Gts6Resul
 
     // **** HE DENSITY ****
     let g4 = g(pd());
-    let db04 = pdm()[0] * g4.exp() * pd()[0];
+    let db04 = pdm()[0] * math::exp(g4) * pd()[0];
     d[0] = densu(alt_km, db04, 4.0, -0.4, &ctx);
     if alt_km <= 200.0 {
         let zh04 = pdm()[2];
         let b04 = densu(zh04, db04, 4.0 - xmm, -1.4, &ctx);
         let dm04 = densu(alt_km, b04, xmm, 0.0, &ctx);
         d[0] = dnet(d[0], dm04, zhm28, xmm, 4.0);
-        let rl = (b28 * pdm()[1] / b04).ln();
+        let rl = math::ln(b28 * pdm()[1] / b04);
         let zc04 = pdm()[4] * pdl()[25];
         let hc04 = pdm()[5] * pdl()[26];
         d[0] *= ccor(alt_km, rl, hc04, zc04);
@@ -787,14 +788,14 @@ fn gts6_mass48(alt_km: f64, geo: &Geophysical, gsurf: f64, re: f64) -> Gts6Resul
 
     // **** O DENSITY ****
     let g16 = g(&pd()[150..300]);
-    let db16 = pdm()[10] * g16.exp() * pd()[150];
+    let db16 = pdm()[10] * math::exp(g16) * pd()[150];
     d[1] = densu(alt_km, db16, 16.0, 0.0, &ctx);
     if alt_km <= 400.0 {
         let zh16 = pdm()[12];
         let b16 = densu(zh16, db16, 16.0 - xmm, -1.0, &ctx);
         let dm16 = densu(alt_km, b16, xmm, 0.0, &ctx);
         d[1] = dnet(d[1], dm16, zhm28, xmm, 16.0);
-        let rl = (b28 * pdm()[11] * pdl()[41].abs() / b16).ln();
+        let rl = math::ln(b28 * pdm()[11] * pdl()[41].abs() / b16);
         let hc16 = pdm()[15] * pdl()[28];
         let zc16 = pdm()[14] * pdl()[27];
         d[1] *= ccor(alt_km, rl, hc16, zc16);
@@ -806,14 +807,14 @@ fn gts6_mass48(alt_km: f64, geo: &Geophysical, gsurf: f64, re: f64) -> Gts6Resul
 
     // **** O2 DENSITY ****
     let g32 = g(&pd()[600..750]);
-    let db32 = pdm()[30] * g32.exp() * pd()[600];
+    let db32 = pdm()[30] * math::exp(g32) * pd()[600];
     d[3] = densu(alt_km, db32, 32.0, 0.0, &ctx);
     if alt_km <= 200.0 {
         let zh32 = pdm()[32];
         let b32 = densu(zh32, db32, 32.0 - xmm, -1.0, &ctx);
         let dm32 = densu(alt_km, b32, xmm, 0.0, &ctx);
         d[3] = dnet(d[3], dm32, zhm28, xmm, 32.0);
-        let rl = (b28 * pdm()[31] / b32).ln();
+        let rl = math::ln(b28 * pdm()[31] / b32);
         let hc32 = pdm()[35] * pdl()[32];
         let zc32 = pdm()[34] * pdl()[31];
         d[3] *= ccor(alt_km, rl, hc32, zc32);
@@ -821,14 +822,14 @@ fn gts6_mass48(alt_km: f64, geo: &Geophysical, gsurf: f64, re: f64) -> Gts6Resul
 
     // **** AR DENSITY ****
     let g40 = g(&pd()[750..900]);
-    let db40 = pdm()[40] * g40.exp() * pd()[750];
+    let db40 = pdm()[40] * math::exp(g40) * pd()[750];
     d[4] = densu(alt_km, db40, 40.0, 0.0, &ctx);
     if alt_km <= 240.0 {
         let zh40 = pdm()[42];
         let b40 = densu(zh40, db40, 40.0 - xmm, -1.0, &ctx);
         let dm40 = densu(alt_km, b40, xmm, 0.0, &ctx);
         d[4] = dnet(d[4], dm40, zhm28, xmm, 40.0);
-        let rl = (b28 * pdm()[41] / b40).ln();
+        let rl = math::ln(b28 * pdm()[41] / b40);
         let hc40 = pdm()[45] * pdl()[34];
         let zc40 = pdm()[44] * pdl()[33];
         d[4] *= ccor(alt_km, rl, hc40, zc40);
@@ -836,14 +837,14 @@ fn gts6_mass48(alt_km: f64, geo: &Geophysical, gsurf: f64, re: f64) -> Gts6Resul
 
     // **** HYDROGEN DENSITY ****
     let g1 = g(&pd()[900..1050]);
-    let db01 = pdm()[50] * g1.exp() * pd()[900];
+    let db01 = pdm()[50] * math::exp(g1) * pd()[900];
     d[6] = densu(alt_km, db01, 1.0, -0.4, &ctx);
     if alt_km <= 320.0 {
         let zh01 = pdm()[52];
         let b01 = densu(zh01, db01, 1.0 - xmm, -1.4, &ctx);
         let dm01 = densu(alt_km, b01, xmm, 0.0, &ctx);
         d[6] = dnet(d[6], dm01, zhm28, xmm, 1.0);
-        let rl = (b28 * pdm()[51] * pdl()[42].abs() / b01).ln();
+        let rl = math::ln(b28 * pdm()[51] * pdl()[42].abs() / b01);
         let hc01 = pdm()[55] * pdl()[36];
         let zc01 = pdm()[54] * pdl()[35];
         d[6] *= ccor(alt_km, rl, hc01, zc01);
@@ -855,14 +856,14 @@ fn gts6_mass48(alt_km: f64, geo: &Geophysical, gsurf: f64, re: f64) -> Gts6Resul
 
     // **** ATOMIC NITROGEN DENSITY ****
     let g14 = g(&pd()[1050..1200]);
-    let db14 = pdm()[60] * g14.exp() * pd()[1050];
+    let db14 = pdm()[60] * math::exp(g14) * pd()[1050];
     d[7] = densu(alt_km, db14, 14.0, 0.0, &ctx);
     if alt_km <= 450.0 {
         let zh14 = pdm()[62];
         let b14 = densu(zh14, db14, 14.0 - xmm, -1.0, &ctx);
         let dm14 = densu(alt_km, b14, xmm, 0.0, &ctx);
         d[7] = dnet(d[7], dm14, zhm28, xmm, 14.0);
-        let rl = (b28 * pdm()[61] * pdl()[2].abs() / b14).ln();
+        let rl = math::ln(b28 * pdm()[61] * pdl()[2].abs() / b14);
         let hc14 = pdm()[65] * pdl()[1];
         let zc14 = pdm()[64] * pdl()[0];
         d[7] *= ccor(alt_km, rl, hc14, zc14);
@@ -908,7 +909,7 @@ pub fn density_kg_m3<R: BodyFixedRotation>(r_sc_m: [f64; 3], rotation: &R, t_tai
     // `AtmosphereModel::CalculateGeodetics`'s own longitude formula (`atan2(state[1],
     // state[0])`, degrees, put in [-180,180] -- atan2's own range already lies in (-180,180]
     // degrees, so no further wrapping is needed) -- see this module's own doc comment.
-    let long_deg = r_bf_km[1].atan2(r_bf_km[0]).to_degrees();
+    let long_deg = math::atan2(r_bf_km[1], r_bf_km[0]).to_degrees();
     let lat_deg = geo_lat_rad.to_degrees();
 
     let (gsurf, re) = glatf(lat_deg);

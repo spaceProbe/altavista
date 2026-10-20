@@ -8,6 +8,8 @@
 //! (`gmat_sys::integrate::Dopri5`) are unaffected. Not a single line of the algorithm below
 //! changed in the move -- see the crate README for the bit-identical verification.
 
+use crate::math;
+
 /// Statistics from one integration.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Stats {
@@ -93,11 +95,11 @@ impl Dopri5 {
                 t += h;
                 x.copy_from_slice(&x5);
                 stats.steps += 1;
-                let factor = if err > 0.0 { (0.9 * err.powf(-0.2)).clamp(0.2, 5.0) } else { 5.0 };
+                let factor = if err > 0.0 { (0.9 * math::powf(err, -0.2)).clamp(0.2, 5.0) } else { 5.0 };
                 h *= factor;
             } else {
                 stats.rejected += 1;
-                h *= (0.9 * err.powf(-0.25)).max(0.1);
+                h *= (0.9 * math::powf(err, -0.25)).max(0.1);
             }
         }
         Ok((x, stats))

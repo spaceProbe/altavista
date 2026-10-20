@@ -41,6 +41,7 @@ use std::collections::BTreeMap;
 pub mod erase;
 pub mod error;
 pub mod integrate;
+pub mod math;
 pub mod stm;
 
 use integrate::Dopri5;

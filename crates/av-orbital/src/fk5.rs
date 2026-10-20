@@ -123,6 +123,7 @@
 //! epoch this module's own tests or the pinning test use, since every one of them is chosen
 //! strictly inside the file's span.
 
+use av_dynamics::math;
 use std::path::{Path, PathBuf};
 
 use av_cdm::time::Tai;
@@ -446,9 +447,9 @@ pub fn precession_matrix(t: f64) -> Mat3 {
     let theta = (2004.3109 * t - 0.42665 * t2 - 0.041833 * t3) * RAD_PER_ARCSEC;
     let z = (2306.2181 * t + 1.09468 * t2 + 0.018203 * t3) * RAD_PER_ARCSEC;
 
-    let (sin_theta, cos_theta) = theta.sin_cos();
-    let (sin_z, cos_z) = z.sin_cos();
-    let (sin_zeta, cos_zeta) = zeta.sin_cos();
+    let (sin_theta, cos_theta) = math::sin_cos(theta);
+    let (sin_z, cos_z) = math::sin_cos(z);
+    let (sin_zeta, cos_zeta) = math::sin_cos(zeta);
 
     [
         [cos_theta * cos_z * cos_zeta - sin_z * sin_zeta, -sin_zeta * cos_theta * cos_z - sin_z * cos_zeta, -sin_theta * cos_z],
@@ -475,7 +476,7 @@ pub fn nutation(t: f64, series: &NutationSeries) -> (Mat3, f64, f64, f64) {
 
     let long_asc_node_lunar = wrap_trunc((CONST125 * RAD_PER_DEG) + (-6_962_890.539_0 * t + 7.455 * t2 + 0.008 * t3) * RAD_PER_ARCSEC);
     let epsbar = (84381.448 - 46.8150 * t - 0.00059 * t2 + 0.001813 * t3) * RAD_PER_ARCSEC;
-    let cos_epsbar = epsbar.cos();
+    let cos_epsbar = math::cos(epsbar);
 
     let mean_anomaly_moon = wrap_trunc((CONST134 * RAD_PER_DEG) + (1_717_915_922.633_0 * t + 31.310 * t2 + 0.064 * t3) * RAD_PER_ARCSEC);
     let mean_anomaly_sun = wrap_trunc((CONST357 * RAD_PER_DEG) + (129_596_581.224_0 * t - 0.577 * t2 - 0.012 * t3) * RAD_PER_ARCSEC);
@@ -490,7 +491,7 @@ pub fn nutation(t: f64, series: &NutationSeries) -> (Mat3, f64, f64, f64) {
             + term.a[2] as f64 * arg_latitude_moon
             + term.a[3] as f64 * mean_elongation_sun
             + term.a[4] as f64 * long_asc_node_lunar;
-        let (sin_arg, cos_arg) = arg.sin_cos();
+        let (sin_arg, cos_arg) = math::sin_cos(arg);
         d_psi += (term.a_arcsec + term.b_arcsec_per_century * t) * sin_arg;
         d_eps += (term.c_arcsec + term.d_arcsec_per_century * t) * cos_arg;
     }
@@ -498,9 +499,9 @@ pub fn nutation(t: f64, series: &NutationSeries) -> (Mat3, f64, f64, f64) {
     d_eps *= RAD_PER_ARCSEC;
 
     let true_ooe = epsbar + d_eps;
-    let (sin_d_psi, cos_d_psi) = d_psi.sin_cos();
-    let (sin_true_ooe, cos_true_ooe) = true_ooe.sin_cos();
-    let sin_epsbar = epsbar.sin();
+    let (sin_d_psi, cos_d_psi) = math::sin_cos(d_psi);
+    let (sin_true_ooe, cos_true_ooe) = math::sin_cos(true_ooe);
+    let sin_epsbar = math::sin(epsbar);
 
     let nut = [
         [cos_d_psi, -sin_d_psi * cos_epsbar, -sin_d_psi * sin_epsbar],
@@ -521,7 +522,7 @@ pub fn sidereal_time_matrix(jd_tt: f64, mjd_ut1: f64, d_psi: f64, long_asc_node_
     let t_ut1_3 = t_ut1_2 * t_ut1;
 
     let (term2, term3) = if jd_tt > JD_OF_JANUARY_1_1997 {
-        (0.00264 * long_asc_node_lunar.sin() * RAD_PER_ARCSEC, 0.000_063 * (2.0 * long_asc_node_lunar).sin() * RAD_PER_ARCSEC)
+        (0.00264 * math::sin(long_asc_node_lunar) * RAD_PER_ARCSEC, 0.000_063 * math::sin(2.0 * long_asc_node_lunar) * RAD_PER_ARCSEC)
     } else {
         (0.0, 0.0)
     };
@@ -547,7 +548,7 @@ pub fn sidereal_time_matrix(jd_tt: f64, mjd_ut1: f64, d_psi: f64, long_asc_node_
     let theta_gmst = (theta_gmst_deg * RAD_PER_DEG).rem_euclid(two_pi);
     let theta_ast = theta_gmst + eq_equinox;
 
-    let (sin_ast, cos_ast) = theta_ast.sin_cos();
+    let (sin_ast, cos_ast) = math::sin_cos(theta_ast);
     let st = [[cos_ast, sin_ast, 0.0], [-sin_ast, cos_ast, 0.0], [0.0, 0.0, 1.0]];
     (st, cos_ast, sin_ast)
 }
@@ -562,8 +563,8 @@ pub fn sidereal_time_dot_matrix(lod_s: f64, cos_ast: f64, sin_ast: f64) -> Mat3 
 
 /// `AxisSystem::ComputePolarMotionRotation`: PEF -> ITRF (body-fixed).
 pub fn polar_motion_matrix(x_arcsec: f64, y_arcsec: f64) -> Mat3 {
-    let (sin_x, cos_x) = (-x_arcsec * RAD_PER_ARCSEC).sin_cos();
-    let (sin_y, cos_y) = (-y_arcsec * RAD_PER_ARCSEC).sin_cos();
+    let (sin_x, cos_x) = math::sin_cos(-x_arcsec * RAD_PER_ARCSEC);
+    let (sin_y, cos_y) = math::sin_cos(-y_arcsec * RAD_PER_ARCSEC);
     [[cos_x, sin_x * sin_y, -sin_x * cos_y], [0.0, cos_y, sin_y], [sin_x, -cos_x * sin_y, cos_x * cos_y]]
 }
 

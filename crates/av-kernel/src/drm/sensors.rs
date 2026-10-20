@@ -142,6 +142,7 @@
 //! fault is ever in force on one instance at a time, so attributing a drained count to "the
 //! currently active fault on this instance" is unambiguous.
 
+use av_dynamics::math;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -210,8 +211,8 @@ pub(crate) fn small_angle_to_quat(v: [f64; 3]) -> [f64; 4] {
     }
     let axis = [v[0] / angle, v[1] / angle, v[2] / angle];
     let half = angle / 2.0;
-    let s = half.sin();
-    [axis[0] * s, axis[1] * s, axis[2] * s, half.cos()]
+    let s = math::sin(half);
+    [axis[0] * s, axis[1] * s, axis[2] * s, math::cos(half)]
 }
 
 /// Inverse of [`small_angle_to_quat`] for an angle `< PI` (always true for a small-angle sensor
@@ -227,7 +228,7 @@ pub(crate) fn quat_to_small_angle(q: [f64; 4]) -> [f64; 3] {
     if vnorm < MIN_ROTATION_ANGLE_RAD {
         return [0.0, 0.0, 0.0];
     }
-    let angle = 2.0 * vnorm.atan2(q[3]);
+    let angle = 2.0 * math::atan2(vnorm, q[3]);
     let axis = [qv[0] / vnorm, qv[1] / vnorm, qv[2] / vnorm];
     [axis[0] * angle, axis[1] * angle, axis[2] * angle]
 }

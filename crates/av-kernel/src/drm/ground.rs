@@ -137,6 +137,7 @@
 //!   so `executor::run_covariance_instance`'s existing generic `DrmError::ModelNotStmCapable`
 //!   refusal applies with no ground-station-specific code.
 
+use av_dynamics::math;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -163,10 +164,10 @@ pub const WGS84_F: f64 = 1.0 / 298.257223563;
 /// acceptance-pin test for the cross-check.
 pub fn geodetic_to_ecef_m(lat_rad: f64, lon_rad: f64, height_m: f64) -> [f64; 3] {
     let e2 = WGS84_F * (2.0 - WGS84_F);
-    let sin_lat = lat_rad.sin();
+    let sin_lat = math::sin(lat_rad);
     let n = WGS84_A_M / (1.0 - e2 * sin_lat * sin_lat).sqrt();
-    let x = (n + height_m) * lat_rad.cos() * lon_rad.cos();
-    let y = (n + height_m) * lat_rad.cos() * lon_rad.sin();
+    let x = (n + height_m) * math::cos(lat_rad) * math::cos(lon_rad);
+    let y = (n + height_m) * math::cos(lat_rad) * math::sin(lon_rad);
     let z = (n * (1.0 - e2) + height_m) * sin_lat;
     [x, y, z]
 }
@@ -184,8 +185,8 @@ pub fn geodetic_to_ecef_m(lat_rad: f64, lon_rad: f64, height_m: f64) -> [f64; 3]
 /// this same triple, not a second computation.
 pub fn ecef_to_topocentric(site_lat_rad: f64, site_lon_rad: f64, site_ecef_m: [f64; 3], target_ecef_m: [f64; 3]) -> [f64; 3] {
     let d = [target_ecef_m[0] - site_ecef_m[0], target_ecef_m[1] - site_ecef_m[1], target_ecef_m[2] - site_ecef_m[2]];
-    let (sin_lat, cos_lat) = (site_lat_rad.sin(), site_lat_rad.cos());
-    let (sin_lon, cos_lon) = (site_lon_rad.sin(), site_lon_rad.cos());
+    let (sin_lat, cos_lat) = (math::sin(site_lat_rad), math::cos(site_lat_rad));
+    let (sin_lon, cos_lon) = (math::sin(site_lon_rad), math::cos(site_lon_rad));
     let east = -sin_lon * d[0] + cos_lon * d[1];
     let north = -sin_lat * cos_lon * d[0] - sin_lat * sin_lon * d[1] + cos_lat * d[2];
     let up = cos_lat * cos_lon * d[0] + cos_lat * sin_lon * d[1] + sin_lat * d[2];
@@ -201,7 +202,7 @@ pub fn elevation_rad(enu: [f64; 3]) -> f64 {
     if horiz == 0.0 && enu[2] == 0.0 {
         return 0.0;
     }
-    enu[2].atan2(horiz)
+    math::atan2(enu[2], horiz)
 }
 
 /// One (site, target) elevation angle at one epoch -- `geodetic_to_ecef_m`, then

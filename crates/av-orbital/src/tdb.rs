@@ -149,6 +149,7 @@
 //! **fixed** `TT - A.1` offset directly (`32.184 - 0.034_381_7` seconds -- both exact
 //! constants, `av_cdm::time`'s own doc names them), rather than re-deriving the
 //! Unix-epoch-relative MJD constant a second time in this crate.
+use av_dynamics::math;
 use av_cdm::time::Tai;
 
 /// `NS_PER_DAY` restated here (as an `f64`) for [`tai_ns_to_tdb_jd2`]'s exact-integer-numerator
@@ -206,7 +207,7 @@ pub fn tai_ns_to_tdb_minus_tt_seconds(t_tai_ns: i64) -> f64 {
     let t_tt_centuries = (jd_tt - T_TT_OFFSET_JD) / T_TT_COEFF1_DAYS_PER_CENTURY;
     let m_e_deg = M_E_OFFSET_DEG + M_E_COEFF1_DEG_PER_CENTURY * t_tt_centuries;
     let m_e_rad = m_e_deg.to_radians();
-    TDB_COEFF1_S * m_e_rad.sin() + TDB_COEFF2_S * (2.0 * m_e_rad).sin()
+    TDB_COEFF1_S * math::sin(m_e_rad) + TDB_COEFF2_S * math::sin(2.0 * m_e_rad)
 }
 
 /// This TAI instant as a full Julian Date on the TDB scale (Barycentric Dynamical Time --

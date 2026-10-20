@@ -133,6 +133,7 @@
 //! a plain `f64` (read off GMAT once, by a human, and hardcoded with a doc comment citing the
 //! read), never a live GMAT call.
 
+use av_dynamics::math;
 use crate::dual::GravScalar;
 
 /// Every way this module's functions can fail -- typed throughout, no panics on any input a
@@ -279,7 +280,7 @@ fn percent_sun_in_penumbra(psunrad: f64, pcbrad: f64, c: f64) -> f64 {
     let b2 = pcbrad * pcbrad;
     let x = (c * c + a2 - b2) / (2.0 * c);
     let y = (a2 - x * x).max(0.0).sqrt();
-    let area = a2 * (x / psunrad).clamp(-1.0, 1.0).acos() + b2 * ((c - x) / pcbrad).clamp(-1.0, 1.0).acos() - c * y;
+    let area = a2 * math::acos((x / psunrad).clamp(-1.0, 1.0)) + b2 * math::acos(((c - x) / pcbrad).clamp(-1.0, 1.0)) - c * y;
     1.0 - area / (std::f64::consts::PI * a2)
 }
 
@@ -332,13 +333,13 @@ pub fn illumination_fraction(r_sc_m: [f64; 3], r_sun_m: [f64; 3], sun_radius_m: 
         return Ok(0.0);
     }
 
-    let a = (sun_radius_m / sat_to_sun_dist).clamp(-1.0, 1.0).asin();
-    let b = (body_radius_m / sat_to_body_dist).clamp(-1.0, 1.0).asin();
+    let a = math::asin((sun_radius_m / sat_to_sun_dist).clamp(-1.0, 1.0));
+    let b = math::asin((body_radius_m / sat_to_body_dist).clamp(-1.0, 1.0));
 
     let unit_body_to_sat = [r_sc_m[0] / sat_to_body_dist, r_sc_m[1] / sat_to_body_dist, r_sc_m[2] / sat_to_body_dist];
     let unit_sat_to_sun = [sat_to_sun[0] / sat_to_sun_dist, sat_to_sun[1] / sat_to_sun_dist, sat_to_sun[2] / sat_to_sun_dist];
     let cos_c = (-dot(unit_body_to_sat, unit_sat_to_sun)).clamp(-1.0, 1.0);
-    let c = cos_c.acos();
+    let c = math::acos(cos_c);
 
     let nu = if a + b <= c {
         1.0

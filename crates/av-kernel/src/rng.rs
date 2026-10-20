@@ -79,6 +79,7 @@
 //! the one order two content-identical seed maps can never disagree about, however differently
 //! they were built or decoded from the wire.
 
+use av_dynamics::math;
 use std::collections::BTreeMap;
 
 /// `PCG_DEFAULT_MULTIPLIER_128` (`pcg_variants.h`): the fixed 128-bit LCG multiplier every
@@ -157,7 +158,7 @@ impl Pcg64 {
     pub fn standard_normal(&mut self) -> f64 {
         let u1 = 1.0 - self.uniform();
         let u2 = self.uniform();
-        (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+        (-2.0 * math::ln(u1)).sqrt() * math::cos(std::f64::consts::TAU * u2)
     }
 }
 

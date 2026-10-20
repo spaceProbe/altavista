@@ -72,6 +72,7 @@
 //! below pins the two to agree to machine precision), not a different formula. Seeding `r`
 //! with [`crate::dual::Dual3`] gives `d(a)/d(r)`, the third-body block of the STM's A-matrix,
 //! analytically -- see [`third_body_partials`].
+use av_dynamics::math;
 use crate::dual::{Dual3, GravScalar};
 
 /// `d(third_body_acceleration)/d(r)` at `r`, analytically, via [`third_body_acceleration_generic`]
@@ -123,9 +124,9 @@ pub fn third_body_acceleration(r: [f64; 3], d: [f64; 3], mu_third: f64) -> [f64;
     let d2 = dot(d, d);
     let q = (dot(r, r) - 2.0 * dot(r, d)) / d2;
     let x = (1.0 + q).sqrt();
-    let f_q = q * (2.0 + q + x) / ((1.0 + q).powf(1.5) * (1.0 + x));
+    let f_q = q * (2.0 + q + x) / (math::powf(1.0 + q, 1.5) * (1.0 + x));
     let d3 = d2 * d2.sqrt();
-    let one_plus_q_15 = (1.0 + q).powf(1.5);
+    let one_plus_q_15 = math::powf(1.0 + q, 1.5);
     let scale = -mu_third / d3;
     [
         scale * (r[0] / one_plus_q_15 + f_q * d[0]),
