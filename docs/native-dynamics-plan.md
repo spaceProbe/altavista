@@ -1925,3 +1925,191 @@ Nothing this plan owes is left undone. What stays open, each with its reason:
   time.
 - **This worktree's next build is cold:** `target/debug/deps` was moved aside at the round's end
   (count and name in the gate section).
+
+## Status (native team manager, 2026-10-19): the cross-platform reproducibility round (question 258)
+
+Question 258 asks for native runs bit-identical across platforms through one portable maths
+implementation, measured before anything is re-pinned. This section records Phase 1 (measure).
+Phase 2 (adopt: re-pin, guard, three-platform proof, docs) waits on the lead's go.
+
+### What is committed, and what is not
+
+- **Committed: the routing, bit-neutral.** Every transcendental call on the native path outside
+  `#[cfg(test)]` (154 sites, 13 files) now goes through `av_dynamics::math`, whose bodies are still
+  the platform's `f64` methods. Measured neutral: the 12-sample study's 14 hashes equal the
+  pre-change binary's, and every native golden residual printed by `av-orbital`'s tests and the
+  kernel's native-golden tests is identical to the last digit.
+- **Not committed: the `libm` backend.** The measurement below used `av_dynamics::math` backed by
+  the `libm` crate (twelve one-line bodies plus one `Cargo.toml` line). It is held as a patch in the
+  round folder until the lead's go, because switching it is the adoption step.
+- **The module lives in `av-dynamics`, not `av-orbital`** (the brief's example): `av-dynamics`'s
+  `Dopri5` step-size control calls `powf`, and `av-orbital` and `av-kernel` both depend on
+  `av-dynamics`, never the reverse.
+
+### Inventory (item 1)
+
+Non-test call sites routed, by function: `cos` 34, `sin` 27, `exp` 22, `powf` 20, `ln` 16,
+`sin_cos` 15, `atan2` 6, `acos` 5, `asin` 3, `atan` 2, `hypot` 2, `log10` 2 (154).
+
+| Crate, file | Functions | What uses it |
+|---|---|---|
+| `av-dynamics` `integrate.rs` | `powf` ×2 | `Dopri5` step-size control: every native integration |
+| `av-orbital` `fk5.rs` | `sin_cos` ×9, `sin` ×3, `cos` | IAU-76/FK5 precession, the 106-term nutation series, sidereal time, polar motion |
+| `av-orbital` `tdb.rs` | `sin` ×2 | TDB − TT |
+| `av-orbital` `third_body.rs` | `powf` ×2 | Battin's `f(q)` for the third-body acceleration |
+| `av-orbital` `srp.rs` | `acos` ×3, `asin` ×2 | conical shadow |
+| `av-orbital` `jacchia_roberts.rs` | 50 (`sin`, `cos`, `atan`, `atan2`, `acos`, `exp`, `ln`, `log10`, `powf`) | Jacchia-Roberts density |
+| `av-orbital` `msise90.rs` | 58 (`sin`, `cos`, `sin_cos`, `exp`, `ln`, `powf`, `atan2`) | MSISE-90 density |
+| `av-kernel` `rng.rs` | `ln`, `cos` | Box-Muller normal draw: every sampled draw, the Gates draw included |
+| `av-kernel` `drm/maneuver.rs` | `hypot` ×2 | Gates sigmas |
+| `av-kernel` `drm/ground.rs` | `sin` ×4, `cos` ×5, `atan2` | geodetic site, elevation |
+| `av-kernel` `drm/sensors.rs` | `sin`, `cos`, `atan2` | star-tracker noise rotation, angle |
+| `av-kernel` `drm/controller.rs` | `asin` | pointing error |
+| `av-kernel` `interpolate.rs` | `acos`, `sin` ×3 | quaternion slerp |
+
+Kept on `std`, each with its reason:
+
+- `sqrt` (gravity, Legendre, third body, drag, ephemeris, expressions, MoE `std_dev`, nalgebra's
+  Cholesky and symmetric eigen): IEEE 754 requires it correctly rounded and aarch64 and x86_64
+  evaluate it in one instruction. Question 248 measured it equal.
+- `powi`: compiler-builtins or inlined multiplications, the same algorithm on every target, not
+  libm. Question 248 measured it equal.
+- Arithmetic, `abs`, `floor`, `round`, `min`, `max`, `clamp`, `rem_euclid`, `to_radians`: IEEE basic
+  or exact operations. Question 248 measured `*`, `/` and `a * b + c` equal. Rust never fuses
+  `a * b + c` on its own, and no native-path code calls `mul_add`.
+- `ln`: question 248 measured it agreeing between Apple and glibc, but no standard requires it
+  correctly rounded, so it is routed.
+- No transcendental call in `av-kernel`'s expression evaluator (`sqrt`, `powi` only), in MoE
+  aggregation (`sqrt` only), or in the sweep's grid and seed code.
+- Outside a native run, not routed: `av-edge`'s ADS-B plugin, `av-jobs`' 3D-tiles code, `av-track`,
+  `frame_gmat.rs`, `gmat_command.rs`.
+
+### The candidate (item 2)
+
+- **`libm` 0.2.16**, MIT, MSRV 1.63 (the workspace's is 1.89). Already in `Cargo.lock` through
+  `num-traits`, so it resolved from the local registry cache: no fetch.
+- **`cargo deny check` with it added:** advisories ok, bans ok, licenses ok, sources ok.
+- **Its only target-specific code** is `sqrt`, `fma` and `rint` through a hardware instruction where
+  one exists. All three are exact or correctly rounded.
+
+### Accuracy against `std` on question 248's 20,000 inputs per function (item 3)
+
+These are the same LCG inputs as question 248's probe. The std mode reproduces question 248's
+macOS and glibc outputs byte for byte.
+
+| Function | libm vs Apple: differ / max ulp | libm vs glibc 2.36: differ / max ulp |
+|---|---|---|
+| `sin`, three ranges | 745–891 / 1 | 554–624 / 1 |
+| `cos`, three ranges | 860–889 / 1 | 584–654 / 1 |
+| `asin` / `acos` | 1707 / 1, 3434 / 1 | 1171 / 1, 1559 / 1 |
+| `exp` | 1942 / 1 | 1939 / 1 |
+| `ln` | 132 / 1 | 132 / 1 |
+| `atan2` / `hypot` | 3602 / 1, 2370 / 1 | 3550 / 1, 1100 / 1 |
+| `powf`, two ranges | 1920–1929 / 1 | 1914–1919 / 1 |
+| `sin_cos`, `atan`, `log10` (new rows) | 848–871, 43, 12 / 1 | 599–623, 43, 331 / 1 |
+| `sqrt`, `powi`, `*`, `/`, `a*b+c` | 0 | 0 |
+
+- **The `libm` crate's output is byte-identical on macOS arm64 (rustc 1.97) and Linux aarch64**
+  (rustc 1.90, glibc 2.36), all 460,000 lines.
+
+### What moves (item 3)
+
+- **No test fails.** Full workspace tests with the `libm` backend: 1926 passed, 0 failed, 4
+  ignored, and `av-kernel`: 1032 passed, 0 failed, 1 ignored. The baseline at `4aafdd3` gave the
+  same counts, with the same 14 SKIPPED lines in both runs. No test pins a hash or value that
+  moves out of its assertion.
+- **The GMAT goldens' distance, before → after, against each golden's own tolerance (question 230).
+  None leaves it.**
+
+| Golden (test) | Tolerance | std libm | `libm` crate | Share of tolerance after |
+|---|---|---|---|---|
+| `leo_1day_jgm2_8x8` (`gravity_goldens`) | 6e-3 m / 6e-6 m/s | 4.557868e-3 / 5.050580e-6 | 4.555853e-3 / 5.048311e-6 | 75.9% / 84.1% |
+| `leo_6h_egm96_70x70` | 5e-4 / 5e-7 | 2.742649e-4 / 3.043023e-7 | 2.745443e-4 / 3.045939e-7 | 54.9% / 60.9% |
+| `leo_1day_jgm2_8x8_sunmoon` (`thirdbody_goldens`) | 6e-3 / 6e-6 | 4.540713e-3 / 5.031362e-6 | 4.533808e-3 / 5.023808e-6 | 75.6% / 83.7% |
+| same, `stm` block: trajectory | 4e-3 / 4e-6 | 2.754026e-3 / 3.051412e-6 | 2.768125e-3 / 3.066997e-6 | 69.2% / 76.7% |
+| same, STM max abs / max rel | 1e-4 / 1e-6 | 6.367550e-5 / 5.558836e-7 | 6.400285e-5 / 5.587401e-7 | 64.0% / 55.9% |
+| same, `det Φ` diff / covariance rel | 1e-9 / 1e-6 | 1.118079e-10 / 5.726872e-10 | 2.012102e-11 / 5.756082e-10 | 2.0% / 0.06% |
+| `leo_1day_jgm2_8x8_mars_jupiter` | 6e-3 / 6e-6 | 4.559312e-3 / 5.052095e-6 | 4.543270e-3 / 5.034329e-6 | 75.7% / 83.9% |
+| `leo_1day_jgm2_8x8_sunmoon_srp` (golden B) | 4e-3 / 4e-6 | 3.170946e-3 / 3.552472e-6 | 3.204440e-3 / 3.589293e-6 | **80.1% / 89.7%** (closest) |
+| `leo_400km_jacchia_roberts` | 10 m / 1e-2 | 3.4907440 / 3.9515490e-3 | 3.4907444 / 3.9515491e-3 | 34.9% / 39.5% |
+| `leo_400km_msise90` | 10 m / 1e-2 | 3.694682 / 4.182630e-3 | 3.694643 / 4.182586e-3 | 36.9% / 41.8% |
+| M5 arc, native (`drag_srp_m5`) | 110 m / 0.13 m/s bound | 68.31605 / 8.029062e-2 | 68.31607 / 8.029064e-2 | 62.1% / 61.8% |
+| FK5 vs `convert` (`fk5_vs_convert`) | 3 × 1.5193960324222241e-9 rad | 1.5193960324222241e-9 | 1.5193960323497342e-9 | 33.3% |
+| `orbital_vs_gmat_score` (kernel) | 0.012 m | 1.2497e-5 max / 1.2112e-5 final | 1.3515e-5 / 1.2680e-5 | 0.11% |
+| kernel 42-state covariance vs `leo_1day_jgm2_8x8_sunmoon` (`golden_acceptance`) | 1e-6 rel (covariance) | 3.086e-11 rel, \|dv\| 1.641e-7 m/s | 2.846e-11 rel, \|dv\| 1.512e-7 m/s | ~0% |
+| `twobody_analytic`, `tdb_check` max, maneuver (`drm_maneuver`), `rmag` (`drm_executor`), ground contact, `expr_*`, `demo_two_instance`, covariance frame conversion | n/a | n/a | unchanged (or last-digit only) | n/a |
+
+- **Recorded numbers that now read differently.** Each is a dated measurement or a measured
+  constant, not an assertion that fails:
+  - the residual tables in `goldens/README.md` and in this plan's round 1–3 Goldens tables;
+  - the test doc comments in `gravity_goldens.rs`, `thirdbody_goldens.rs`, `orbital_vs_gmat_score.rs`
+    ("1.2e-5 m" is now 1.35e-5) and `model.rs` (symplectic 5.872545e-9 is now 5.863366e-9);
+  - `fk5_vs_convert.rs`'s `MEASURED_MAX_ANGLE_RAD`;
+  - the dated "measured" sentences inside five golden JSONs' `reason` fields;
+  - `msise90`'s README row, "3.6947 m", is now 3.6946 m.
+  - The GMAT reference values in the goldens do not move.
+- **The study's scores** move by at most 9.1e-9 relative (3.9e-5 absolute), the same size as
+  question 248's macOS-to-Linux difference (7.5e-9).
+- **Committed run fixtures.** `tests/fixtures/demo_attitude_control` and `demo_measurements`
+  (native attitude and sensors) would regenerate differently: last-ulp values and the
+  `port_traffic_hash`. They are frozen inputs that consumers decode, never compared against a fresh
+  run, and neither reproduces at `4aafdd3` either (the two runs differ in 12,787 and 17 decoded
+  lines). `goldens/sweep_results_json` is synthetic and does not move.
+  `services/sweep/IMAGE_DIGEST.md` moves with any code change, and the image must be rebuilt for
+  `k8s_sweep.rs` to compare a `libm` container.
+
+### Cost (item 3)
+
+- **Release, macOS arm64, three alternated runs each, median:**
+  - +0.6%: gravity-only (JGM2 8×8 one day, EGM96 70×70).
+  - +8.9%: Sun and Moon.
+  - +6.8%: SRP.
+  - +19.6% to +29.3%: the atmospheres (Jacchia-Roberts +22.8%, MSISE-90 +29.3%, M5 +19.6%), which
+    are `exp`/`ln`/`powf`-bound.
+- **The 12-sample study (`--workers 1`, seven alternated runs, median):**
+  - macOS: 4.037 s → 4.388 s (+8.7%).
+  - Linux aarch64 container: 4.770 s → 4.691 s (−1.7%, inside the spread).
+
+### Cross-platform preview (item 4)
+
+- **Setup:** the same study with identical paths, run by a release `av-sweep --no-default-features`
+  on this host and in `rust:1.90-bookworm@sha256:3914072c…` on Colima linux/arm64.
+  - The Linux binaries were built inside that container with `--network none`.
+  - Crates came from `cargo vendor --offline` of the local cache.
+  - `protoc` was replayed from descriptor sets recorded on the host (Homebrew protoc), so no
+    apt install and no network were needed. The scripts are in the round's scratch folder.
+
+| | macOS `libm` | Linux `libm` | macOS std (`4aafdd3`) | Linux std (`4aafdd3`) |
+|---|---|---|---|---|
+| `sweep_results.pb` | `0629601cc212…` | `0629601cc212…` | `1aef95bec15d…` | `98e66a491b1b…` |
+| `sweep_results.json` | `318e07a0082b…` | `318e07a0082b…` | `58f2ac996e5a…` | `70d261209067…` |
+| 12 × `run_products.pb` | 12 equal to Linux | 12 equal to macOS | all differ | all differ |
+
+- **With the `libm` backend: 14 of 14 hashes equal.** The control, std at `4aafdd3`, gives 0 of 14,
+  reproducing question 248.
+
+### Decisions taken (numbered, for ratification)
+
+1. `av_dynamics::math` is the one module, because of the dependency direction; `av-orbital` does
+   not re-export it.
+2. Calls inside `#[cfg(test)]` stay on `std`. Their references then show what moved.
+3. `ln` is routed even though it agreed between Apple and glibc. `sqrt` and `powi` are not.
+4. The routing is committed with the platform backend now; the `libm` switch waits for the go.
+5. The Linux build ran offline (vendored crates, replayed `protoc`) rather than through
+   `services/sweep/build-image.sh`'s apt and crates fetch.
+
+### Proposed for Phase 2 (the lead's ruling)
+
+1. Switch `av_dynamics::math` to `libm` 0.2.16 (the held patch).
+2. Re-record the moved native residuals in `goldens/README.md`, the test doc comments, this plan,
+   and `fk5_vs_convert.rs`'s measured constant, each with old and new values. Do not regenerate the
+   GMAT goldens: their reference values do not move, and the `reason` sentences are dated history.
+3. Leave the frozen `tests/fixtures/*.runproducts.bin` unchanged, since nothing compares them with a
+   fresh run.
+4. The guard: a clippy `disallowed-methods` list for the routed `f64` methods, with
+   `av_dynamics::math` the only `#[allow]`. It is per-workspace, so the native crates need a scoped
+   form (a `clippy.toml` per native crate, or a grep test). The choice is the gate failure we can
+   actually demonstrate.
+5. The three-platform proof needs a `linux/amd64` image. None is on this host (`rust@3914072c…` and
+   `debian:bookworm-slim@88200866…` are arm64 only here). It needs one fetch by digest of
+   `rust:1.90-bookworm` for linux/amd64.
