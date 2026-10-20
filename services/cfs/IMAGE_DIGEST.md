@@ -149,7 +149,7 @@ sha256:56d7bd000b215f8153e7be6e889eb85fea548db5f6fd616e1eaf5b12c4d66199
 
 - Built from commit (question 232, extending question 212(a) -- the paths this covers are `services/cfs/IMAGE_COPIED_PATHS.txt`):
 ```
-24857557bd3e4388563c841904109b4daf8bf795
+c1ccbbfbeb1c2cfb21758addf97ca86cee64e227
 ```
 
 ## Re-recorded 2026-10-19 (question 254's native-open round): same image, the build commit moved
