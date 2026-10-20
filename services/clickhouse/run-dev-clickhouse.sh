@@ -33,7 +33,8 @@
 #   - Applies no schema; the store's own migration does that.
 #
 # Usage: services/clickhouse/run-dev-clickhouse.sh
-# Stop it with the `docker rm -f <container id>` command this script prints at the end.
+# Stop it with the `docker rm -f -v <container id>` command this script prints at the end (`-v` for
+# consistency with every other removal, question 261; the tmpfs above already leaves no volume).
 
 set -euo pipefail
 
@@ -152,5 +153,5 @@ echo "  Try:          curl -s -u $CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD 'http://1
 echo "                (ready within a few seconds -- poll /ping; the entrypoint creates the database first)"
 echo "  No schema is applied by this script. No TLS: the image enables no https_port by default"
 echo "  (services/clickhouse/IMAGE_DIGEST.md)."
-echo "  Stop it with: docker rm -f $CONTAINER_ID"
+echo "  Stop it with: docker rm -f -v $CONTAINER_ID"
 echo "  (labelled av.test=1 -- the next docker-gated test run on this host will also prune it)"

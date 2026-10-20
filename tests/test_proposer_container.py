@@ -370,7 +370,7 @@ class ResourceGuard:
 
     def cleanup(self) -> None:
         for name in self.containers:
-            subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
+            subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True, timeout=30)
         for name in self.networks:
             subprocess.run(["docker", "network", "rm", name], capture_output=True, timeout=30)
 

@@ -24,11 +24,35 @@ It imports the standard library and `manifest` only, so it ships inside every ki
 |---|---|
 | `container-base-image` | an image listed in the pin's `base_of` is carried (`images.<c>.collected`) |
 | `data-tree` (GMAT) | `packs.<pin.pack>` is present |
-| `container-image` (Versity Gateway, PostGIS, ClickHouse) | the pin's id is in `operator_supplied_declared`, which `build_kit.py --declare-operator-supplied NAME` fills (default: empty) |
+| `container-image` (Versity Gateway, PostGIS, ClickHouse) | the pin's id is in `operator_supplied_declared`, which `build_kit.py --declare-operator-supplied NAME` fills (default: empty); ClickHouse alone is also OPTIONAL when not declared (below) |
 | `python-wheel` | an entry of `wheels.operator_supplied` names the pin's id as its `component`: the wheel step found a bundled GPL-family library in that wheel (`wheel_libs.py`) and did not carry the wheel |
 
-A service image that is not declared is outside the kit and is listed as such, not verified. A pin
-with a `held` entry (ClickHouse, question 247) cannot be declared at all: the builder refuses it.
+A service image that is not declared is outside the kit and is listed as such, not verified.
+
+# An optional operator-supplied image (question 260: ClickHouse)
+
+A `container-image` pin may carry `optional: {question, enables, otherwise}`. ClickHouse does: its server
+binary statically links LGPL libraries, so the kit never carries the image (question 251), but a site may
+load the pinned digest onto its Docker host and then gets the ClickHouse MoE (sweep study) store; without it
+the MoE store is the file store and nothing fails. The words of that sentence are the pin's own `optional`
+entry, in one place. An optional image that the kit does not declare is `optional (...)`, not "outside the
+kit": the image step (`verify_optional_image`) looks at the Docker host and the files install lists it as
+`checked by the image step, not here`. Declaring it (`--declare-operator-supplied clickhouse`) makes it
+required like Versity Gateway. The image step's `--moe-store auto|file|clickhouse` (default `auto`) chooses
+how it is treated:
+
+| `--moe-store` | image on the host is the pin | another image of the repository | no image of the repository |
+|---|---|---|---|
+| `auto` (undeclared) | `verified`, store clickhouse | refused `image-digest-differs` (names `--moe-store file`) | `not-configured`, store file, the walk continues |
+| `file` | `not-selected` (found recorded), store file | `not-selected` (found recorded), store file | `not-selected`, store file |
+| `clickhouse`, or declared | `verified`, store clickhouse | refused `image-digest-differs` | refused `image-missing` |
+
+A lookup that fails (`docker image ls` / the inspect output unreadable) is refused `image-lookup-failed`
+under every value and is never read as absent. A kit that declares ClickHouse with `--moe-store file` is a
+contradiction the image step refuses before any docker call (`moe-store-contradiction`).
+`moe_store_selection(results, mode)` is the ONE place that decides the store, from the ClickHouse result's
+outcome and the mode: ClickHouse is selected only for `verified`. "Selected" means recorded
+(`IMAGE_BUILD_RECORD.moe_store`): nothing in the installed system reads the selection yet.
 
 A `python-wheel` pin is `{dist, version, filename, sha256, reference}`; the operator downloads that exact
 file and the files install (`--operator-wheels DIR`) accepts it only when the sha256 of `DIR/<filename>`
@@ -62,7 +86,11 @@ Line shape (two spaces between the three fields):
     operator-supplied: gmat-r2026a  required (packs.gmat)  verified macos-arm64 sha256:d21cddbbffbd… 2060 files
     operator-supplied: gmat-r2026a  required (packs.gmat)  verified linux-x86_64 (rhel7) sha256:3db3afed6d28… 2043 files
     operator-supplied: gmat-r2026a  required (packs.gmat)  verified by the files install, not here (...)
-    operator-supplied: clickhouse  outside the kit, not verified (not declared; held pending licence review, q247)
+    operator-supplied: versitygw  outside the kit, not verified (not declared; a site that deploys it builds the kit with --declare-operator-supplied versitygw)
+    operator-supplied: clickhouse  optional (question 260: enables the ClickHouse MoE (sweep study) store; the file store otherwise)  checked by the image step, not here (record: IMAGE_BUILD_RECORD moe_store; this step does not read it)
+    operator-supplied: clickhouse  optional (...)  verified sha256:6ded2b2c2f2c… via Id
+    operator-supplied: clickhouse  optional (...)  not configured (not on this Docker host; the MoE store is the file store). To add it: ...
+    operator-supplied: clickhouse  optional (...)  not selected (--moe-store file; ...)
 
 Digests are shortened to 12 hex digits in the printed line; the structured form (`Verification.to_record`,
 written into `INSTALL_RECORD.installed.operator_supplied.components` and `IMAGE_BUILD_RECORD.operator_supplied`)
@@ -94,6 +122,20 @@ STEP_RECORDS = {
     STEP_FILES: "INSTALL_RECORD installed.operator_supplied.components",
     STEP_IMAGES: "IMAGE_BUILD_RECORD operator_supplied",
 }
+#: Where the image step records the MoE store it selected (`moe_store_selection`).
+MOE_RECORD = "IMAGE_BUILD_RECORD moe_store"
+#: The component whose result decides the MoE store (question 260).
+MOE_COMPONENT = "clickhouse"
+MOE_AUTO, MOE_FILE, MOE_CLICKHOUSE = "auto", "file", "clickhouse"
+#: The values of the image step's `--moe-store`.
+MOE_MODES = (MOE_AUTO, MOE_FILE, MOE_CLICKHOUSE)
+#: The key of `verify_all`'s `verifiers` for an image whose pin carries `optional`.
+OPTIONAL_IMAGE = "optional-container-image"
+#: What the installed system does with the selection (the same words in both records).
+MOE_CONSUMER_NOTE = (
+    "nothing in the installed system reads this selection yet: 'selected' means recorded here (no consumer in the "
+    "kit); av-sweep still selects its store by its own flags (--store-dir, --store-clickhouse)"
+)
 
 KIND_BASE = "container-base-image"
 KIND_IMAGE = "container-image"
@@ -107,6 +149,11 @@ REFUSED = "refused"
 OTHER_STEP = "other-step"
 NOT_REQUIRED = "not-required"
 OUTSIDE_KIT = "outside-kit"
+#: An optional component (question 260) that the other step checks / that is not on this host / that
+#: `--moe-store file` chose not to select.
+OPTIONAL_OTHER_STEP = "optional-other-step"
+NOT_CONFIGURED = "not-configured"
+NOT_SELECTED = "not-selected"
 
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 
@@ -121,6 +168,7 @@ class Requirement:
     text: str           # "required (base of cfs-image)", "not required (...)", "outside the kit"
     outside_kit: bool = False
     why_not: str = ""   # the parenthetical for a service image that is not declared
+    optional: bool = False   # the pin carries `optional` (question 260): required only when declared or `--moe-store clickhouse`
 
 
 @dataclass
@@ -207,6 +255,18 @@ def pins_problems(pins: object) -> list[str]:
         verification = pin.get("verification")
         if not isinstance(verification, dict) or verification.get("step") != STEP_OF_KIND[kind] or not verification.get("method"):
             problems.append(f"{cid}.verification: must be {{step: {STEP_OF_KIND[kind]!r}, method: ...}}")
+        if "held" in pin:
+            problems.append(f"{cid}.held: no longer supported (question 260 replaced it with `optional`)")
+        if "optional" in pin:
+            optional = pin["optional"]
+            if kind != KIND_IMAGE:
+                problems.append(f"{cid}.optional: only a {KIND_IMAGE} can be optional, not a {kind}")
+            elif not (
+                isinstance(optional, dict) and set(optional) == {"question", "enables", "otherwise"}
+                and isinstance(optional["question"], int) and not isinstance(optional["question"], bool)
+                and all(isinstance(optional[k], str) and optional[k].strip() for k in ("enables", "otherwise"))
+            ):
+                problems.append(f"{cid}.optional: must be {{question: int, enables: str, otherwise: str}}")
         if kind in (KIND_BASE, KIND_IMAGE):
             digest, reference = pin.get("digest"), pin.get("reference")
             if not _is_digest(digest):
@@ -217,9 +277,6 @@ def pins_problems(pins: object) -> list[str]:
                 problems.append(f"{cid}.base_of: missing or empty")
             if "arm64_manifest_digest" in pin and not _is_digest(pin["arm64_manifest_digest"]):
                 problems.append(f"{cid}.arm64_manifest_digest: not sha256:<64 hex>")
-            held = pin.get("held")
-            if held is not None and not (isinstance(held, dict) and isinstance(held.get("question"), int) and held.get("summary")):
-                problems.append(f"{cid}.held: must be {{question: int, summary: str}}")
         elif kind == KIND_WHEEL:
             for key in ("dist", "version", "reference"):
                 if not isinstance(pin.get(key), str) or not pin[key].strip():
@@ -257,7 +314,8 @@ def kit_operator_wheels(doc: dict) -> list[dict]:
 def declaration_problems(names: list[str], pins: Mapping[str, dict]) -> list[str]:
     """What is wrong with a `--declare-operator-supplied` list: a name that is not a component of the
     pins file, one that is not a service container image (the bases and GMAT are derived from what the
-    kit carries, never declared), or one that is held out of the kit."""
+    kit carries, never declared). An optional image (ClickHouse, question 260) is declarable: declaring it
+    makes it required."""
     problems: list[str] = []
     for name in names:
         pin = pins.get(name)
@@ -268,24 +326,46 @@ def declaration_problems(names: list[str], pins: Mapping[str, dict]) -> list[str
                 f"{name!r} is a {pin.get('kind')}, derived from what the kit carries; only a service container image "
                 f"is declared (declarable: {sorted(declarable(pins))})"
             )
-        elif pin.get("held"):
-            held = pin["held"]
-            problems.append(f"{name!r} is held out of the kit: {held['summary']} (question {held['question']})")
     return problems
 
 
 def declarable(pins: Mapping[str, dict]) -> list[str]:
-    return [cid for cid, pin in pins.items() if pin.get("kind") == KIND_IMAGE and not pin.get("held")]
+    return [cid for cid, pin in pins.items() if pin.get("kind") == KIND_IMAGE]
+
+
+def optional_text(pin: dict) -> str:
+    """The words for an optional image, from the pin's own `optional` entry and nowhere else."""
+    o = pin["optional"]
+    return f"optional (question {o['question']}: enables {o['enables']}; {o['otherwise']} otherwise)"
+
+
+def moe_mode_problem(doc: dict, pins: Mapping[str, dict], mode: str) -> Optional[str]:
+    """Why `--moe-store MODE` cannot be used for the kit described by `doc`, or None. An unknown mode, or
+    `file` for a kit that declares ClickHouse (a declared image is required; `file` says never to use it).
+    Reads nothing but its arguments: the image step calls it before any docker call."""
+    if mode not in MOE_MODES:
+        return f"--moe-store {mode!r} is not one of {list(MOE_MODES)}"
+    declared = [c for c in doc.get("operator_supplied_declared") or [] if (pins.get(c) or {}).get("optional")]
+    if mode == MOE_FILE and declared:
+        return (
+            f"this kit declares {', '.join(declared)} (KIT_MANIFEST operator_supplied_declared, "
+            f"--declare-operator-supplied {declared[0]}), so the image is required, and --moe-store file says never to "
+            f"use it: a contradiction. Drop --moe-store file, or use a kit built without the declaration"
+        )
+    return None
 
 
 # =================================================================================================
 # What the kit needs
 # =================================================================================================
 
-def requirement_for(pin_id: str, pin: dict, doc: dict, *, images: Optional[set] = None) -> Requirement:
+def requirement_for(
+    pin_id: str, pin: dict, doc: dict, *, images: Optional[set] = None, moe_mode: str = MOE_AUTO,
+) -> Requirement:
     """Whether the kit described by `doc` (a parsed `KIT_MANIFEST`) needs this component, and the words
     for it. `images`, when given, restricts which of the kit's images count (the image step's
-    `--component`). Nothing here reads anything but `doc` and `pin`."""
+    `--component`). `moe_mode` is the image step's `--moe-store`: `clickhouse` makes an optional image
+    required. Nothing here reads anything but `doc` and `pin`."""
     kind = pin["kind"]
     if kind == KIND_BASE:
         collected = {c for c, e in (doc.get("images") or {}).items() if isinstance(e, dict) and e.get("collected")}
@@ -307,14 +387,15 @@ def requirement_for(pin_id: str, pin: dict, doc: dict, *, images: Optional[set] 
         if any(e.get("component") == pin_id for e in kit_operator_wheels(doc)):
             return Requirement(True, f"required (wheels.operator_supplied: {pin['filename']})")
         return Requirement(False, "not required (no wheel of the kit bundles a GPL-family library)")
+    optional = bool(pin.get("optional"))
     declared = doc.get("operator_supplied_declared") or []
     if pin_id in declared:
-        return Requirement(True, f"required (declared at build time: --declare-operator-supplied {pin_id})")
-    held = pin.get("held")
-    why = (
-        f"not declared; {held['summary']}, q{held['question']}" if held
-        else f"not declared; a site that deploys it builds the kit with --declare-operator-supplied {pin_id}"
-    )
+        return Requirement(True, f"required (declared at build time: --declare-operator-supplied {pin_id})", optional=optional)
+    if optional:
+        if moe_mode == MOE_CLICKHOUSE:
+            return Requirement(True, f"required (--moe-store clickhouse; question {pin['optional']['question']})", optional=True)
+        return Requirement(False, optional_text(pin), optional=True)
+    why = f"not declared; a site that deploys it builds the kit with --declare-operator-supplied {pin_id}"
     return Requirement(False, "outside the kit", outside_kit=True, why_not=why)
 
 
@@ -367,6 +448,19 @@ def render_line(v: Verification) -> str:
             f"{v.requirement}  verified by the {STEP_NAMES[other]}, not here "
             f"(record: {STEP_RECORDS[other]}; this step does not read it)"
         )
+    if v.outcome == OPTIONAL_OTHER_STEP:
+        other = STEP_OF_KIND[v.kind]
+        return head + (
+            f"{v.requirement}  checked by the {STEP_NAMES[other]}, not here "
+            f"(record: {MOE_RECORD}; this step does not read it)"
+        )
+    if v.outcome == NOT_CONFIGURED:
+        return head + (
+            f"{v.requirement}  not configured ({v.reason}; the MoE store is {v.detail['otherwise']}). "
+            f"To add it: {v.detail['how_to_add']}"
+        )
+    if v.outcome == NOT_SELECTED:
+        return head + f"{v.requirement}  not selected ({v.detail['summary']})"
     if v.outcome == VERIFIED:
         return head + f"{v.requirement}  verified {v.detail.get('summary', short(v.expected))}"
     return head + f"{v.requirement}  NOT VERIFIED [{v.code}]"
@@ -380,6 +474,7 @@ def verify_all(
     verifiers: Mapping[str, Callable[[str, dict, Requirement], Verification]],
     out: Optional[Callable[[str], None]] = None,
     images: Optional[set] = None,
+    moe_mode: str = MOE_AUTO,
 ) -> list[Verification]:
     """Walks every component of the pins file in item order, prints its line through `out` as it goes,
     and returns the results. A component the kit needs and `step` verifies goes to `verifiers[kind]`; one
@@ -403,16 +498,23 @@ def verify_all(
         out(render_line(refused))
         raise ComponentRefused(refused, [refused])
     for pin_id, pin in sorted(pins.items(), key=lambda kv: kv[1]["item"]):
-        req = requirement_for(pin_id, pin, doc, images=images)
+        req = requirement_for(pin_id, pin, doc, images=images, moe_mode=moe_mode)
         base = dict(component=pin_id, item=pin["item"], kind=pin["kind"], step=step, required=req.required, requirement=req.text)
-        if not req.required:
+        if not req.required and not req.optional:
             outcome = OUTSIDE_KIT if req.outside_kit else NOT_REQUIRED
             result = Verification(outcome=outcome, detail={"why_not": req.why_not} if req.why_not else {}, **base)
         elif STEP_OF_KIND[pin["kind"]] != step:
+            # An optional image that is not required is the other step's to look at; one that is required
+            # (declared) is verified there like any other.
             result = Verification(
-                outcome=OTHER_STEP, reason=f"verified by the {STEP_NAMES[STEP_OF_KIND[pin['kind']]]}",
-                expected=pin.get("digest"), **base,
+                outcome=OTHER_STEP if req.required else OPTIONAL_OTHER_STEP,
+                reason=f"verified by the {STEP_NAMES[STEP_OF_KIND[pin['kind']]]}" if req.required
+                else f"checked by the {STEP_NAMES[STEP_OF_KIND[pin['kind']]]}",
+                expected=pin.get("digest"),
+                detail=_optional_detail(pin_id, pin) if req.optional else {}, **base,
             )
+        elif req.optional:
+            result = verifiers[OPTIONAL_IMAGE](pin_id, pin, req)
         else:
             result = verifiers[pin["kind"]](pin_id, pin, req)
         results.append(result)
@@ -428,6 +530,16 @@ def verify_all(
 
 def _text(data: bytes) -> str:
     return data.decode("utf-8", "replace")
+
+
+def _verified_by(image_id: object, repo_digests: object, digest: str) -> Optional[str]:
+    """How an inspected image is the pinned `digest`: `"Id"` (containerd store: the image id IS the index
+    digest), `"RepoDigests"` (classic store: an entry ends `@<digest>`), or None (it is not)."""
+    if image_id == digest:
+        return "Id"
+    if any(isinstance(d, str) and d.endswith("@" + digest) for d in (repo_digests or [])):
+        return "RepoDigests"
+    return None
 
 
 def verify_image(docker: Callable[..., Any], pin_id: str, pin: dict, requirement: Requirement) -> Verification:
@@ -468,11 +580,8 @@ def verify_image(docker: Callable[..., Any], pin_id: str, pin: dict, requirement
     except (ValueError, IndexError, TypeError) as e:
         return refused(missing, f"`docker image inspect {ref}` gave output this step cannot read: {e}")
     image_id, repo_digests = info.get("Id"), info.get("RepoDigests") or []
-    if image_id == digest:
-        via = "Id"
-    elif any(d.endswith("@" + digest) for d in repo_digests):
-        via = "RepoDigests"
-    else:
+    via = _verified_by(image_id, repo_digests, digest)
+    if via is None:
         return refused(
             "base-image-digest-differs" if is_base else "image-digest-differs",
             f"the image found for {ref} has Id {image_id} and RepoDigests {repo_digests!r}; neither is the pinned digest "
@@ -482,6 +591,243 @@ def verify_image(docker: Callable[..., Any], pin_id: str, pin: dict, requirement
     detail = {"reference": ref, "digest": digest, "image_id": image_id, "verified_by": via,
               "summary": f"{short(digest)} via {via}"}
     return Verification(outcome=VERIFIED, found=image_id, detail=detail, **base)
+
+
+# =================================================================================================
+# An optional container image (ClickHouse, question 260) and the MoE store decision
+# =================================================================================================
+
+LIST_IMAGES_ARGS = ["image", "ls", "--no-trunc", "--digests", "--format", "{{json .}}"]
+
+
+def optional_how_to_add(pin_id: str, pin: dict) -> str:
+    """How an operator adds an optional image (one text, used by the line, the refusals and both records)."""
+    ref = pin["reference"]
+    return (
+        f"load an image saved from exactly {ref} (`docker load -i <tarball>`; on a connected machine: "
+        f"`docker pull {ref}` then `docker save {ref} -o {pin_id}.tar`), then re-run `install.sh --build-images <kit>`"
+    )
+
+
+def _optional_detail(pin_id: str, pin: dict) -> dict:
+    return {
+        "reference": pin["reference"], "digest": pin["digest"], "repository": pin["reference"].partition("@")[0],
+        "optional": dict(pin["optional"]), "otherwise": pin["optional"]["otherwise"],
+        "how_to_add": optional_how_to_add(pin_id, pin),
+    }
+
+
+def _list_repository(docker: Callable[..., Any], repository: str) -> tuple[Optional[list[dict]], str]:
+    """Every image of `repository` on the Docker host, tagged or digest-only, as `(rows, "")`, or
+    `(None, why)` when the lookup failed. Measured on the containerd image store: `docker image ls
+    --no-trunc --digests --format '{{json .}}' <repository>` lists digest-only entries (Tag `<none>`) and
+    exits 0 with no output for a repository the host does not hold."""
+    r = docker(LIST_IMAGES_ARGS + [repository], timeout=60.0)
+    if r.returncode != 0:
+        return None, f"`docker image ls {repository}` rc={r.returncode}: {_text(r.stderr).strip()}"
+    rows: list[dict] = []
+    for line in _text(r.stdout).splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError as e:
+            return None, f"`docker image ls {repository}` gave a line this step cannot read ({e}): {line[:200]!r}"
+        if not isinstance(row, dict):
+            return None, f"`docker image ls {repository}` gave a line that is not an object: {line[:200]!r}"
+        if row.get("Repository") == repository:
+            rows.append({"repository": repository, "tag": row.get("Tag"), "id": row.get("ID"), "digest": row.get("Digest")})
+    return rows, ""
+
+
+def _describe_found(found: dict) -> str:
+    parts = []
+    if found.get("inspect"):
+        parts.append(f"the pinned reference resolves to Id {found['inspect'].get('Id')} (RepoDigests {found['inspect'].get('RepoDigests')!r})")
+    for i in found.get("images") or []:
+        parts.append(f"{i['repository']}:{i['tag']} id {i['id']} digest {i['digest']}")
+    return "; ".join(parts) or "nothing"
+
+
+def verify_optional_image(
+    docker: Callable[..., Any], pin_id: str, pin: dict, requirement: Requirement, mode: str = MOE_AUTO,
+) -> Verification:
+    """An image whose pin is `optional` (ClickHouse, question 260), looked for on the Docker host by its
+    digest-qualified reference and, when that is not found, by its repository (every image of it, tagged
+    or digest-only). Module doc, "An optional operator-supplied image", has the table of outcomes by
+    `mode` (`--moe-store`). `requirement.required` is true when the kit declares the image or `mode` is
+    `clickhouse`: absent is then `image-missing`, as for any declared image. Never raises for an image that
+    is merely absent or different; a lookup that fails is `image-lookup-failed` under every mode. Nothing
+    is pulled or loaded."""
+    ref, digest = pin["reference"], pin["digest"]
+    repository = ref.partition("@")[0]
+    strict = requirement.required
+    file_mode = mode == MOE_FILE and not strict
+    detail = _optional_detail(pin_id, pin)
+    base = dict(
+        component=pin_id, item=pin["item"], kind=pin["kind"], step=STEP_IMAGES, required=requirement.required,
+        requirement=requirement.text, expected=digest,
+    )
+
+    def refused(code: str, reason: str, found: Any = None) -> Verification:
+        return Verification(outcome=REFUSED, code=code, reason=reason, found=found, detail=detail, **base)
+
+    def lookup_failed(why: str) -> Verification:
+        return refused(
+            "image-lookup-failed",
+            f"cannot tell whether {ref} is on this Docker host: {why}. Nothing was enabled and nothing was pulled; "
+            f"a failed lookup is never read as 'not on this host'. Fix the Docker lookup and re-run.",
+        )
+
+    r = docker(["image", "inspect", ref], timeout=60.0)
+    inspected: Optional[dict] = None
+    images: list[dict] = []
+    via: Optional[str] = None
+    inspect_failure = ""
+    if r.returncode == 0:
+        try:
+            info = json.loads(_text(r.stdout))[0]
+            inspected = {"Id": info.get("Id"), "RepoDigests": info.get("RepoDigests") or []}
+        except (ValueError, IndexError, TypeError, AttributeError) as e:
+            return lookup_failed(f"`docker image inspect {ref}` gave output this step cannot read ({e})")
+        via = _verified_by(inspected["Id"], inspected["RepoDigests"], digest)
+    else:
+        inspect_failure = f"`docker image inspect` rc={r.returncode}: {_text(r.stderr).strip()}"
+        listed, why = _list_repository(docker, repository)
+        if listed is None:
+            return lookup_failed(f"{inspect_failure}; then {why}")
+        images = listed
+    found = {"inspect": inspected, "images": images, "pinned_image_present": via is not None}
+    detail = {**detail, "found": found}
+
+    if via is not None:
+        if file_mode:
+            return Verification(
+                outcome=NOT_SELECTED, found=found, reason="--moe-store file: ClickHouse is not selected",
+                detail={**detail, "summary": "--moe-store file; the pinned image is on this Docker host and was left unused"},
+                **base,
+            )
+        detail = {**detail, "image_id": inspected["Id"], "verified_by": via, "summary": f"{short(digest)} via {via}"}
+        return Verification(outcome=VERIFIED, found=inspected["Id"], detail=detail, **base)
+    if inspected is not None or images:
+        if file_mode:
+            return Verification(
+                outcome=NOT_SELECTED, found=found, reason="--moe-store file: ClickHouse is not selected",
+                detail={**detail, "summary": f"--moe-store file; a ClickHouse image that is not the pin is on this Docker host and was left alone: {_describe_found(found)}"},
+                **base,
+            )
+        hint = "" if strict else (
+            " To go on without ClickHouse and leave that image alone, pass --moe-store file (the MoE store is then "
+            "the file store and the image is recorded as found)."
+        )
+        return refused(
+            "image-digest-differs",
+            f"this Docker host holds a ClickHouse image that is not the pinned {ref} (expected digest {digest}): "
+            f"{_describe_found(found)}. Nothing was enabled and nothing was pulled. To use ClickHouse, "
+            f"{optional_how_to_add(pin_id, pin)}.{hint}",
+            found=found,
+        )
+    if file_mode:
+        return Verification(
+            outcome=NOT_SELECTED, found=found, reason="--moe-store file: ClickHouse is not selected",
+            detail={**detail, "summary": "--moe-store file; no ClickHouse image on this Docker host"}, **base,
+        )
+    if strict:
+        return refused(
+            "image-missing",
+            f"the image {ref} is not on this Docker host (expected digest {digest}; {inspect_failure}). Load the "
+            f"operator-supplied image first -- `docker load -i <tarball>` of an image saved from exactly that digest -- "
+            f"and re-run. Nothing was pulled.",
+        )
+    return Verification(outcome=NOT_CONFIGURED, found=found, reason="not on this Docker host", detail=detail, **base)
+
+
+def _clickhouse_result(results: "list[Verification]") -> Optional[Verification]:
+    return next((r for r in results if r.component == MOE_COMPONENT), None)
+
+
+def moe_store_selection(results: "list[Verification]", mode: str = MOE_AUTO) -> dict:
+    """THE decision (question 260), the only one, of which MoE store the image step records:
+    ClickHouse only when the ClickHouse result is `verified` (declared, `--moe-store clickhouse`, or
+    optional and found by `--moe-store auto`); the file store for `not-configured` (auto, absent) and
+    `not-selected` (`--moe-store file`). Any other outcome, or an outcome the mode cannot produce, cannot
+    reach here (a refusal stops the step before a record is written) and raises `AssertionError`.
+    "Selected" means recorded: nothing in the installed system reads it yet (`MOE_CONSUMER_NOTE`)."""
+    if mode not in MOE_MODES:
+        raise ValueError(f"--moe-store {mode!r} is not one of {list(MOE_MODES)}")
+    r = _clickhouse_result(results)
+    if r is None:
+        return {
+            "mode": mode, "store": "file", "decided_by": "image step", "consumer": MOE_CONSUMER_NOTE,
+            "clickhouse": {"configured": False, "reason": f"the pins file has no {MOE_COMPONENT} component"},
+        }
+    decided = {"mode": mode, "decided_by": "image step", "consumer": MOE_CONSUMER_NOTE}
+    if r.outcome == VERIFIED and mode != MOE_FILE:
+        d = r.detail
+        return {
+            **decided, "store": "clickhouse", "file_store": "available",
+            "clickhouse": {
+                "configured": True, "reference": d["reference"], "digest": d["digest"], "image_id": d["image_id"],
+                "verified_by": d["verified_by"],
+                "how_enabled": (
+                    f"the pinned image is on this Docker host, verified by digest ({d['verified_by']}); "
+                    f"{'--moe-store clickhouse' if mode == MOE_CLICKHOUSE else 'the kit declares it' if r.required else '--moe-store auto'} "
+                    f"selected the ClickHouse store, the file store stays available"
+                ),
+            },
+        }
+    if r.outcome == NOT_CONFIGURED and mode == MOE_AUTO:
+        return {
+            **decided, "store": "file",
+            "clickhouse": {"configured": False, "reason": r.reason, "how_to_add": r.detail["how_to_add"]},
+        }
+    if r.outcome == NOT_SELECTED and mode == MOE_FILE:
+        return {
+            **decided, "store": "file",
+            "clickhouse": {
+                "configured": False, "selected": False, "outcome": NOT_SELECTED, "reason": r.reason,
+                "found": r.found, "how_to_enable": "re-run the image step with --moe-store auto (or clickhouse)",
+            },
+        }
+    raise AssertionError(f"outcome {r.outcome!r} with --moe-store {mode} cannot reach the MoE store decision")
+
+
+def moe_store_files_install(results: "list[Verification]") -> dict:
+    """`INSTALL_RECORD.installed.moe_store`: the files install holds no Docker socket and does not decide the
+    store; the image step does (`IMAGE_BUILD_RECORD.moe_store`). Recorded as the file store, ClickHouse not
+    configured by this step."""
+    r = _clickhouse_result(results)
+    declared = r is not None and r.outcome == OTHER_STEP
+    how_to_add = (r.detail.get("how_to_add") if r is not None else None) or None
+    reason = (
+        f"this step holds no Docker socket; ClickHouse was declared at build time (--declare-operator-supplied "
+        f"{MOE_COMPONENT}) and only the image step can verify it (install.sh --build-images), which records the store "
+        f"it selects in IMAGE_BUILD_RECORD.moe_store"
+        if declared else
+        "this step holds no Docker socket; ClickHouse is an optional operator-supplied image that only the image step "
+        "can verify (install.sh --build-images), which records the store it selects in IMAGE_BUILD_RECORD.moe_store"
+    )
+    return {
+        "store": "file", "decided_by": "image step (install.sh --build-images), not this step",
+        "consumer": MOE_CONSUMER_NOTE,
+        "clickhouse": {
+            "configured": False, "by": "files install", "reason": reason, "declared": declared, "how_to_add": how_to_add,
+        },
+    }
+
+
+def render_moe_store(selection: dict) -> str:
+    """The one printed `MoE store:` line for a record made by `moe_store_selection` or `moe_store_files_install`."""
+    ch = selection["clickhouse"]
+    if selection["store"] == "clickhouse":
+        repo = ch["reference"].partition("@")[0]
+        return f"MoE store: clickhouse ({repo}@{short(ch['digest'])} verified via {ch['verified_by']})"
+    if ch.get("selected") is False:
+        return f"MoE store: file -- ClickHouse is not selected (--moe-store file); on this Docker host: {_describe_found(ch['found'])}"
+    return (
+        f"MoE store: file -- ClickHouse is not configured: {ch['reason']}. "
+        f"To add it: {ch.get('how_to_add') or 'see docs/kit-operator-supplied.md'}"
+    )
 
 
 # =================================================================================================

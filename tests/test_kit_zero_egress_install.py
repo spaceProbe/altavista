@@ -547,7 +547,10 @@ class ResourceGuard:
 
     def cleanup(self) -> None:
         for name in self.containers:
-            subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
+            # `-v`: an image can declare a `VOLUME` (the edge-plugin and av-ingest images do); without it
+            # each removal left an anonymous, unlabelled volume behind (question 255/261). It removes
+            # only anonymous volumes, never the named ones `self.volumes` removes below.
+            subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True, timeout=30)
         for tag in self.images:
             subprocess.run(["docker", "rmi", tag], capture_output=True, timeout=30)
         for name in self.networks:
@@ -1128,7 +1131,7 @@ def _run_zero_egress_install_and_demo_from_the_kit_alone():
         assert "installed kit" in install_run.stdout, f"install.sh did not report success:\n{install_run.stdout}"
         assert "--no-index" not in install_run.stderr, "unexpected: --no-index itself should never appear as an error"
         print(f"\n--- install.sh, inside the enclave (question 148) ---\nelapsed={install_elapsed_s:.2f}s\n{install_run.stdout}")
-        subprocess.run(["docker", "rm", "-f", installer_container], capture_output=True, timeout=30)
+        subprocess.run(["docker", "rm", "-f", "-v", installer_container], capture_output=True, timeout=30)
 
         # Cross-check the sha256 install.sh itself printed against this test's own, independent
         # computation on the host -- two independent ways of asking the same question.
@@ -1426,7 +1429,7 @@ def _run_edge_plugin_from_kit_image(guard: ResourceGuard, run_id: str, ingest_co
     assert summary["batch_count"] == EXPECTED_BATCH_COUNT, summary
     assert summary["measurement_count"] == EXPECTED_BATCH_COUNT, summary
     assert summary["chain_head_hex"] == EXPECTED_CHAIN_HEAD_HEX, summary
-    subprocess.run(["docker", "rm", "-f", plugin_container], capture_output=True, timeout=30)
+    subprocess.run(["docker", "rm", "-f", "-v", plugin_container], capture_output=True, timeout=30)
 
     evidence_probe_container = _labelled_id(run_id, "evidence-probe")
     guard.track_container(evidence_probe_container)

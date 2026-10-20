@@ -473,7 +473,7 @@ impl Drop for NamespaceGuard {
         }
         for name in run_containers(&self.run_id, &self.name) {
             eprintln!("WARNING: container {name} of run {} outlived its namespace; removing it", self.run_id);
-            let _ = Command::new("docker").args(["rm", "-f", &name]).output();
+            let _ = Command::new("docker").args(["rm", "-f", "-v", &name]).output();
         }
     }
 }

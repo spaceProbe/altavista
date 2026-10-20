@@ -440,7 +440,10 @@ class ResourceGuard:
 
     def cleanup(self) -> None:
         for name in self.containers:
-            subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
+            # `-v`: the plugin image declares `VOLUME /var/lib/edge-plugin`; without it each removal of a
+            # container that did not mount over it left an anonymous volume (question 261). Named
+            # volumes are removed below, never by `-v`.
+            subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True, timeout=30)
         for name in self.networks:
             subprocess.run(["docker", "network", "rm", name], capture_output=True, timeout=30)
         # Volumes last -- removing one still referenced by a not-yet-removed container fails.
@@ -717,7 +720,7 @@ def _run_network_none_denies_everything_and_the_internal_network_delivers_batche
         # Done reading it back -- remove it now rather than leaving it to linger through Parts
         # 2's evidence read and Part 3 below (guard.cleanup() would also catch it, but there is
         # no reason to keep an exited container around once this test is finished with it).
-        subprocess.run(["docker", "rm", "-f", plugin_container], capture_output=True, timeout=30)
+        subprocess.run(["docker", "rm", "-f", "-v", plugin_container], capture_output=True, timeout=30)
 
         # -----------------------------------------------------------------------------------
         # The kernel's own view of that SAME posture, from `docker exec` of a RUNNING container
@@ -756,14 +759,14 @@ def _run_network_none_denies_everything_and_the_internal_network_delivers_batche
             print(f"\n--- plugin container hardening, from docker exec of the RUNNING container "
                   f"(question 148) -- PARTIAL, before the disk-exhausted volume write ---\n"
                   f"{json.dumps(e.partial_facts)}")
-            subprocess.run(["docker", "rm", "-f", hardening_probe_container], capture_output=True, timeout=30)
+            subprocess.run(["docker", "rm", "-f", "-v", hardening_probe_container], capture_output=True, timeout=30)
             pytest.skip(
                 f"user/NoNewPrivs/Seccomp/read-only-root posture confirmed ({json.dumps(e.partial_facts)}), "
                 f"but the final write-to-volume probe could not complete: {e}"
             )
         print(f"\n--- plugin container hardening, from docker exec of the RUNNING container (question 148) ---\n"
               f"{json.dumps(probe_facts)}")
-        subprocess.run(["docker", "rm", "-f", hardening_probe_container], capture_output=True, timeout=30)
+        subprocess.run(["docker", "rm", "-f", "-v", hardening_probe_container], capture_output=True, timeout=30)
 
         # Read the evidence surface back independently -- a second, disposable container
         # joined to the SAME shared namespace (never published to the Docker host at all;

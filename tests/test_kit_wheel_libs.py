@@ -576,9 +576,27 @@ def test_the_image_step_lists_the_wheel_as_the_files_installs(world):
     doc = world.doc()
     pins = json.loads(world.pins_path.read_text())["components"]
     out: list[str] = []
-    results = operator_check.verify_all(operator_check.STEP_IMAGES, doc, pins, verifiers={}, out=out.append)
+    calls: list[list] = []
+
+    def no_clickhouse_host(args, timeout=None):
+        # Question 260: the image step always looks for the optional ClickHouse image; this host has none
+        # (the reference does not resolve and no image of its repository is listed).
+        import subprocess
+        calls.append(list(args))
+        if args[:2] == ["image", "inspect"]:
+            return subprocess.CompletedProcess(args, 1, b"", b"Error: No such image")
+        return subprocess.CompletedProcess(args, 0, b"", b"")
+
+    def optional(pin_id, pin, requirement):
+        return operator_check.verify_optional_image(no_clickhouse_host, pin_id, pin, requirement)
+
+    results = operator_check.verify_all(
+        operator_check.STEP_IMAGES, doc, pins, verifiers={operator_check.OPTIONAL_IMAGE: optional}, out=out.append,
+    )
     (r,) = [r for r in results if r.component == "wheel-demo"]
     assert r.outcome == "other-step" and "verified by the files install, not here" in _wheel_lines(out)[0]
+    # only the optional ClickHouse image was looked for, and only read-only
+    assert calls and {tuple(c[:2]) for c in calls} <= {("image", "inspect"), ("image", "ls")}
 
 
 # --- pip itself: the one verified file is installed by path; the operator's other files are never candidates ---

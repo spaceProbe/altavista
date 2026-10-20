@@ -393,7 +393,7 @@ def _run_docker_image_lifecycle_pull_by_digest_run_bind_and_remove():
                 assert len(resp.binding_hash) == 64
                 return resp.binding_hash, cid
             finally:
-                _docker("rm", "-f", cid)
+                _docker("rm", "-f", "-v", cid)
                 container_id = None
 
         hash_a, _ = bind_hash_for_digest_env("sha256:" + "a" * 64)
@@ -403,7 +403,7 @@ def _run_docker_image_lifecycle_pull_by_digest_run_bind_and_remove():
         # Never leave a container, the throwaway registry, or the pushed/built image tags
         # behind, success or failure.
         if container_id is not None:
-            subprocess.run(["docker", "rm", "-f", container_id], capture_output=True)
+            subprocess.run(["docker", "rm", "-f", "-v", container_id], capture_output=True)
         if registry_id is not None:
             # `-v`: registry:2 declares VOLUME /var/lib/registry; without it each run left an
             # anonymous volume behind.

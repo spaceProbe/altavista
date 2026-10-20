@@ -8,8 +8,8 @@ recorded `libssl3` `.deb`) and no base layer (`scripts/kit/image_layer.py`, `doc
 supplied.md` items 1 and 2). This module turns that into images, on the machine that has the
 operator's base images and the `docker` CLI:
 
-    <kit>/installer/install.sh --build-images <kit> [--component C ...] [--image-tag COMPONENT=REF ...] [--record FILE]
-    <kit>/installer/install.sh --probe-offline-build <kit>
+    <kit>/installer/install.sh --build-images <kit> [--component C ...] [--image-tag COMPONENT=REF ...] [--record FILE] [--moe-store auto|file|clickhouse]
+    <kit>/installer/install.sh --probe-offline-build <kit> [--moe-store auto|file|clickhouse]
 
 It ships inside every kit (`build_kit.INSTALLER_SOURCE_FILES`), imports only the standard library,
 `manifest` and `docker_image_tags`, and is what `install.py` dispatches to for those two flags.
@@ -47,7 +47,16 @@ step the operator runs ON THE DOCKER HOST, with the same kit, after (or before) 
    their kinds: `base-image-missing`, `base-image-digest-differs`, and for a declared service image
    `operator-image-missing`, `operator-image-digest-differs`. The same list goes into the record's
    `operator_supplied`. `operator_check.py`'s module doc says how to read this output together with
-   the files install's.)
+   the files install's.) ClickHouse (question 260) is the one OPTIONAL operator-supplied image: not
+   declared, it is looked for on the host (`operator_check.verify_optional_image`, by reference and then by
+   repository) and `--moe-store auto|file|clickhouse` (default `auto`) says what that means: `auto` verifies it
+   when it is the pin (`MoE store: clickhouse`), reports `not configured` when no ClickHouse image is on the
+   host (the file store; the walk continues), and refuses any other ClickHouse image
+   (`operator-image-digest-differs`, naming `--moe-store file`); `file` never selects it and never refuses for
+   it, but records what it found; `clickhouse` requires the pin as if the kit declared it. A lookup that
+   fails is `operator-image-lookup-failed` under every value, and a kit that declares ClickHouse with
+   `--moe-store file` is refused (`moe-store-contradiction`) before any docker call. After the list one
+   `MoE store: ...` line is printed. Nothing is pulled or loaded for it, ever.
 4. The tag for each image: `--image-tag COMPONENT=REF`, default `av-kit/<component>:<first 12 hex of
    KIT_MANIFEST's sha256>`. Never the recorded `:local` tag (refused), and never a tag that already
    exists on the host: this step only ever creates a name, so it can later remove exactly the name
@@ -77,7 +86,9 @@ step the operator runs ON THE DOCKER HOST, with the same kit, after (or before) 
    `./IMAGE_BUILD_RECORD`, never overwritten; NOT inside the kit, which would no longer verify) holds,
    per image: tag, built image id and whether that id existed before, the base reference and digest
    with how it was verified, the recorded and computed runtime-content hashes and `equal`, the mode
-   and `.Config` checks, and the build flags.
+   and `.Config` checks, and the build flags; `moe_store` is the MoE store the image step selected
+   and why (`operator_check.moe_store_selection`: `mode`, `store`, and what was found about ClickHouse).
+   "Selected" means recorded: nothing in the installed system reads it yet.
 
 `--probe-offline-build <kit>` proves the BUILD step is offline, not just the files install: through
 the same `build_from_context` and flags it builds throwaway images from each pinned base whose
@@ -178,6 +189,19 @@ class OperatorImageDigestDiffers(ImageBuildRefused):
     kind = "operator-image-digest-differs"
 
 
+class OperatorImageLookupFailed(ImageBuildRefused):
+    """The Docker host could not be asked whether an optional operator-supplied image (ClickHouse) is on it.
+    Never read as 'absent'."""
+
+    kind = "operator-image-lookup-failed"
+
+
+class MoeStoreContradiction(ImageBuildRefused):
+    """`--moe-store` contradicts the kit (an unknown value, or `file` for a kit that declares ClickHouse)."""
+
+    kind = "moe-store-contradiction"
+
+
 #: `operator_check.Verification.code` of an unverified image -> the refusal this step raises for it
 #: (a code with no entry here is a problem with the kit or the pins file: `KitRefused`).
 _REFUSAL_BY_CODE = {
@@ -185,6 +209,7 @@ _REFUSAL_BY_CODE = {
     "base-image-digest-differs": BaseImageDigestDiffers,
     "image-missing": OperatorImageMissing,
     "image-digest-differs": OperatorImageDigestDiffers,
+    "image-lookup-failed": OperatorImageLookupFailed,
 }
 
 
@@ -423,8 +448,16 @@ def check_docker(docker: Runner) -> None:
         raise DockerUnavailable(f"the Docker daemon is not reachable (`docker version` rc={r.returncode}): {_text(r.stderr).strip()}")
 
 
+def check_moe_mode(plan: KitPlan, moe_store: str) -> None:
+    """`--moe-store` against the kit, with no docker call: an unknown value, or `file` for a kit that
+    declares ClickHouse, is a `MoeStoreContradiction`."""
+    problem = operator_check.moe_mode_problem(plan.doc, plan.pins, moe_store)
+    if problem:
+        raise MoeStoreContradiction(problem)
+
+
 def verify_operator_components(
-    docker: Runner, plan: KitPlan, out: Callable[[str], None],
+    docker: Runner, plan: KitPlan, out: Callable[[str], None], moe_store: str = operator_check.MOE_AUTO,
 ) -> tuple[list, dict[str, dict]]:
     """Step 3 (question 250(a), task 3). Every component of the installer's pins file, in item order,
     one printed line each (`operator_check.verify_all`): the bases of the images this run builds and any
@@ -433,15 +466,21 @@ def verify_operator_components(
     install and is listed as such. For EVERY image, before any build. Returns `(results, bases)`, `bases`
     being `{image component: {reference, digest, image_id, verified_by}}` for the record. A required
     image that is absent or different raises its typed refusal after its line (and those before it) were
-    printed; nothing was built and nothing was pulled."""
+    printed; nothing was built and nothing was pulled. An image whose pin is `optional` (ClickHouse, question 260)
+    is looked for by `operator_check.verify_optional_image` under `moe_store` (`--moe-store`); the store it
+    gives is `operator_check.moe_store_selection(results, moe_store)`, which `build_images` records."""
     def verify(pin_id: str, pin: dict, requirement: operator_check.Requirement) -> operator_check.Verification:
         return operator_check.verify_image(docker, pin_id, pin, requirement)
+
+    def verify_optional(pin_id: str, pin: dict, requirement: operator_check.Requirement) -> operator_check.Verification:
+        return operator_check.verify_optional_image(docker, pin_id, pin, requirement, moe_store)
 
     try:
         results = operator_check.verify_all(
             operator_check.STEP_IMAGES, plan.doc, plan.pins,
-            verifiers={operator_check.KIND_BASE: verify, operator_check.KIND_IMAGE: verify},
-            out=out, images=set(plan.components),
+            verifiers={operator_check.KIND_BASE: verify, operator_check.KIND_IMAGE: verify,
+                       operator_check.OPTIONAL_IMAGE: verify_optional},
+            out=out, images=set(plan.components), moe_mode=moe_store,
         )
     except operator_check.ComponentRefused as e:
         raise _REFUSAL_BY_CODE.get(e.result.code, KitRefused)(e.result.reason) from e
@@ -752,12 +791,14 @@ def remove_created_tags(docker: Runner, created: list[dict], before_table: dict)
 def build_images(
     docker: Runner, kit_dir: Path, *, image_tags: Optional[list[str]] = None, record_path: Optional[Path] = None,
     container_labels: Optional[Mapping[str, str]] = None, out: Callable[[str], None] = print, pins_file: Optional[Path] = None,
-    components: Optional[list[str]] = None,
+    components: Optional[list[str]] = None, moe_store: str = operator_check.MOE_AUTO,
 ) -> dict:
     """Steps 1-9. Returns the record (also written to `record_path`). `components` restricts the
-    build to some of the kit's images (every image is still verified as part of the kit)."""
+    build to some of the kit's images (every image is still verified as part of the kit). `moe_store` is
+    `--moe-store` (module doc, step 3): checked against the kit before any docker call."""
     labels = dict(container_labels or {})
     plan = load_kit(kit_dir, pins_file)
+    check_moe_mode(plan, moe_store)
     if components:
         unknown = sorted(set(components) - set(plan.components))
         if unknown:
@@ -768,7 +809,9 @@ def build_images(
     if record_path.exists():
         raise ImageBuildRefused(f"{record_path} already exists; refusing to overwrite a record -- choose --record elsewhere")
     check_docker(docker)
-    operator_results, bases = verify_operator_components(docker, plan, out)
+    operator_results, bases = verify_operator_components(docker, plan, out, moe_store)
+    moe_selection = operator_check.moe_store_selection(operator_results, moe_store)
+    out(operator_check.render_moe_store(moe_selection))
     run_text = _text_runner(docker)
     before_table = docker_image_tags.docker_image_table(run_text)
     existing = docker_image_tags._tags_of(before_table)
@@ -812,6 +855,7 @@ def build_images(
             "components": [r.to_record() for r in operator_results],
             "note": "a GMAT tree is verified by the files install (INSTALL_RECORD); this step reads no tree and does not read that record",
         },
+        "moe_store": moe_selection,
     }
     partial = record_path.with_name(record_path.name + f".{uuid.uuid4().hex}.partial")
     partial.write_text(json.dumps(record, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -820,12 +864,17 @@ def build_images(
     return record
 
 
-def probe_offline_build(docker: Runner, kit_dir: Path, *, run_id: Optional[str] = None, out: Callable[[str], None] = print, pins_file: Optional[Path] = None) -> list[dict]:
-    """`--probe-offline-build`: see this module's doc. Returns one result per (probe, base)."""
+def probe_offline_build(
+    docker: Runner, kit_dir: Path, *, run_id: Optional[str] = None, out: Callable[[str], None] = print,
+    pins_file: Optional[Path] = None, moe_store: str = operator_check.MOE_AUTO,
+) -> list[dict]:
+    """`--probe-offline-build`: see this module's doc. Returns one result per (probe, base). Prints the same
+    operator-supplied list (`--moe-store` applies to it) and writes no record."""
     plan = load_kit(kit_dir, pins_file)
+    check_moe_mode(plan, moe_store)
     check_docker(docker)
     run_id = run_id or uuid.uuid4().hex[:12]
-    _results, verified = verify_operator_components(docker, plan, out)
+    _results, verified = verify_operator_components(docker, plan, out, moe_store)
     bases = {b["reference"]: b for b in verified.values()}
     run_text = _text_runner(docker)
     results = []
@@ -876,6 +925,14 @@ def main(argv: list[str], *, docker: Runner = docker_runner) -> int:
     mode, rest = argv[0], argv[1:]
     p = argparse.ArgumentParser(prog=f"install.sh {mode}", description=__doc__.split("# What `--build-images` does")[0])
     p.add_argument("kit_dir", type=Path, help="an existing kit directory (KIT_MANIFEST + content)")
+    p.add_argument(
+        "--moe-store", choices=operator_check.MOE_MODES, default=operator_check.MOE_AUTO,
+        help="the MoE (sweep study) store (question 260). auto (default): the ClickHouse store when the pinned "
+             "ClickHouse image is on this Docker host, the file store when no ClickHouse image is; any other "
+             "ClickHouse image is refused. file: never ClickHouse, whatever the host holds (recorded as found). "
+             "clickhouse: the pinned image is required, as if the kit declared it. Recorded in "
+             "IMAGE_BUILD_RECORD.moe_store.mode",
+    )
     if mode == "--build-images":
         p.add_argument("--image-tag", action="append", default=[], metavar="COMPONENT=REF", help="tag for a component's image (default av-kit/<component>:<manifest hash>)")
         p.add_argument("--component", action="append", default=[], metavar="COMPONENT", help="build only this image (repeatable; default: every image in the kit)")
@@ -886,10 +943,10 @@ def main(argv: list[str], *, docker: Runner = docker_runner) -> int:
         if mode == "--build-images":
             build_images(
                 docker, args.kit_dir, image_tags=args.image_tag, record_path=args.record, components=args.component,
-                container_labels=_label_pairs(args.extract_container_label),
+                container_labels=_label_pairs(args.extract_container_label), moe_store=args.moe_store,
             )
         else:
-            probe_offline_build(docker, args.kit_dir)
+            probe_offline_build(docker, args.kit_dir, moe_store=args.moe_store)
     except ImageBuildRefused as e:
         print(f"install.sh {mode}: REFUSED [{e.kind}] -- {e}", file=sys.stderr)
         return 2

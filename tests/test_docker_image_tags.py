@@ -184,7 +184,7 @@ class _Scratch:
 
     def cleanup(self) -> None:
         if self.registry_name:
-            subprocess.run(["docker", "rm", "-f", self.registry_name], capture_output=True, timeout=60)
+            subprocess.run(["docker", "rm", "-f", "-v", self.registry_name], capture_output=True, timeout=60)
         # By name first (an untag, or the removal of our own last name), then by id for what is left.
         # Only ids that carry THIS run's label are ever removed by id.
         for _ in range(3):

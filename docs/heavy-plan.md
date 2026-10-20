@@ -4396,3 +4396,210 @@ Dangling anonymous volumes went from 27 to 50 during the gate's window:
   code. The lead regenerates `docs/compliance/`.
 - **The other `docker rm -f` without `-v`** (defect 5), for their owners.
 - **Question 260** (ClickHouse operator-supplied) is queued for this team's next round.
+
+## Status (heavy manager, 2026-10-20) — the ClickHouse operator-supplied round (question 260)
+
+This round does not reopen the plan. It makes ClickHouse an optional operator-supplied component of the
+air-gap kit (question 260, closing question 247 without a licence review) and closes question 261's
+remaining `docker rm -f` calls without `-v`. `## Delivered` stands. No proto moved and no Rust source
+outside three test files changed. The lead's rulings on the manager's six design decisions are cited as L1 to L6; its rulings on the
+workers' reports are named where they apply.
+
+### What landed, one commit per accepted task
+
+| Commit | What |
+| --- | --- |
+| `64a003c` | Tasks 1 and 2: ClickHouse is an optional operator-supplied image. The pin drops `held` and gains `optional`; the image step looks for it under `--moe-store auto\|file\|clickhouse`; `operator_check.moe_store_selection` is the one decision; both records carry the result; the 7 situations × 3 modes test matrix and a docker-gated real-image test. |
+| `13200ed` | Task 4: every `docker rm -f` without `-v` that question 261 listed, the three more in the same files and six more found by a repository grep, take `-v`; the PostGIS and ClickHouse dev scripts' printed removal hints too. |
+| `6a7a28f` | Task 3: the records (`docs/kit-operator-supplied.md`, `scripts/kit/README.md`, `services/clickhouse/IMAGE_DIGEST.md`, the regenerated `IMAGE_PACKAGES.txt` header, `docs/p5-plan.md`'s two superseded lines). |
+| `ddf3f36` | Defect 1 (found by the gate): `test_kit_wheel_libs.py`'s image-step listing test supplies the optional-image verifier. |
+| this commit | this status section |
+
+### Task 1: what the installer does
+
+The files install runs in the enclave with no Docker socket, so only the host-side image step
+(`install.sh --build-images`) can look for a container image. ClickHouse is therefore verified there,
+by digest, exactly as the other operator-supplied images are (`docker image inspect` of the pinned
+reference: `Id` or a `RepoDigests` entry equals the pin). When the reference does not resolve, the step
+lists every image of the repository (`docker image ls --no-trunc --digests --format '{{json .}}'
+clickhouse/clickhouse-server`, measured on this host's containerd store: it lists digest-only entries
+and exits 0 with no output for an absent repository).
+
+| `--moe-store` | the pinned image is on the host | another ClickHouse image | no ClickHouse image |
+| --- | --- | --- | --- |
+| `auto` (default; the kit does not declare it) | verified; MoE store `clickhouse` | refused `operator-image-digest-differs`, naming `--moe-store file` and how to load the pin; exit 2, no record, no build | not configured; MoE store `file`; how to add it; exit 0 |
+| `file` | not selected, what was found recorded; store `file` | not selected, recorded; store `file` | not selected; store `file` |
+| `clickhouse`, or the kit declares it | verified; store `clickhouse` | refused `operator-image-digest-differs` | refused `operator-image-missing` |
+
+A lookup that fails is refused `operator-image-lookup-failed` under every value, never read as
+absent. `--moe-store file` on a kit built with `--declare-operator-supplied clickhouse` is refused
+`moe-store-contradiction` before any docker call. Nothing is pulled, loaded or removed.
+
+The three cases on this host (the docker-gated test, `AV_KIT_CLICKHOUSE_REAL=1`, under the lock):
+- **Verified** (the real pin):
+  `operator-supplied: clickhouse  optional (question 260: enables the ClickHouse MoE (sweep study) store; the file store otherwise)  verified sha256:6ded2b2c2f2c… via Id`,
+  then `MoE store: clickhouse (clickhouse/clickhouse-server@sha256:6ded2b2c2f2c… verified via Id)`.
+- **Absent** (a pins copy whose repository the host does not hold):
+  `... not configured (not on this Docker host; the MoE store is the file store). To add it: load an image saved from exactly clickhouse/clickhouse-server@sha256:6ded… (docker load -i <tarball>; on a connected machine: docker pull … then docker save … -o clickhouse.tar), then re-run install.sh --build-images <kit>`,
+  then `MoE store: file -- ClickHouse is not configured: not on this Docker host. To add it: …`; exit 0.
+- **Wrong digest** (a pins copy with one hex digit changed): `... NOT VERIFIED [image-digest-differs]`
+  and `install.sh --build-images: REFUSED [operator-image-digest-differs] -- this Docker host holds a
+  ClickHouse image that is not the pinned … clickhouse/clickhouse-server:26.8.29.10 id sha256:6ded… …
+  Nothing was enabled and nothing was pulled. … To go on without ClickHouse and leave that image alone,
+  pass --moe-store file …`; exit 2. With `--moe-store file` the same host gives `not selected … was
+  left alone: clickhouse/clickhouse-server:26.8.29.10 …`.
+
+The files install prints `operator-supplied: clickhouse  optional (...)  checked by the image step, not
+here (record: IMAGE_BUILD_RECORD moe_store; this step does not read it)` and records
+`INSTALL_RECORD.installed.moe_store`: the file store, `decided_by: "image step (install.sh
+--build-images), not this step"`.
+
+**"Enabled" means recorded (L5).** Nothing in the installed system reads the selection yet: the kit
+carries no `av-sweep`, and `av-sweep` selects its store by its own flags (`--store-dir`,
+`--store-clickhouse`). The installed system does not use ClickHouse because of this round. A consumer is
+open.
+
+The kit never carries the image: the builder's image tables and the SBOM components have no ClickHouse
+entry, and kits built with and without the declaration hold only the pin and the declared name.
+
+### Task 2: the tests
+
+- Docker-free: the 7 situations (pin present by `Id`, by `RepoDigests`, the reference resolving to
+  another image, another image listed, nothing, the listing failing, the listing unreadable) × the 3
+  modes, each asserting the printed lines, exit code, record, that no build was issued on a refusal and
+  that nothing was pulled; `moe_store_selection` over every outcome and mode; the files install; the
+  contradiction; declared present and absent; the kit trees; the pin-vs-record check for `clickhouse`
+  against `services/clickhouse/IMAGE_DIGEST.md`.
+- Docker-gated (`AV_KIT_CLICKHOUSE_REAL=1`, read-only docker commands): 4 passed, re-run by the manager.
+- Perturbations: selecting ClickHouse for `not-configured` fails 3 tests (worker); ignoring the
+  repository listing fails 13 (manager); one digit of the pin fails the pin-vs-record check and is
+  refused against the real host; one digit of item 4's digest in the doc fails the doc-table test.
+
+### Task 3: the records
+
+`operator_supplied.json` (`optional`, `why`), `docs/kit-operator-supplied.md` (item 4 row, "How it
+works", "Items 4 to 6" with the table above, known gaps naming the missing consumer, "To make the kit
+match" item 8), `scripts/kit/README.md` ("ClickHouse and `--moe-store`", with printed lines),
+`services/clickhouse/IMAGE_DIGEST.md` (operator-supplied; the save-and-load facts kept: the alias, the
+266,032,128-byte tarball and its sha256, "do not `docker rmi` the alias"). `IMAGE_PACKAGES.txt` was
+regenerated from the pinned image already on the host (`--pull never --network none`, under the lock):
+only its question-247 header line changed; all 111 package rows are identical (the lead's ruling). `docs/p5-plan.md`'s
+two historical lines carry a dated superseded note (the lead's ruling). **SBOMs: none moves.** No committed SBOM
+lists ClickHouse or any service image (`grep -il clickhouse -r docs/compliance` finds nothing), and
+`regenerate_compliance.py --check` at the gate head printed `up to date -- a real run would change
+nothing`. Question 6's Redpanda review is unaffected.
+
+### Task 4: the `docker rm -f` leak table
+
+Measured with `docker create --pull never` then `docker rm -f` against `docker rm -f -v`, counting
+`docker volume ls -q --filter dangling=true`, under the lock (scratch `rmv_measure.out`).
+
+| Site | Image | `Config.Volumes` | Leak reproduced | Fix |
+| --- | --- | --- | --- | --- |
+| `tests/test_kit_zero_egress_install.py:550` (`ResourceGuard`) | the kit-built edge-plugin image, `python:3.13-slim` | `{"/var/lib/edge-plugin":{}}` / `null` | yes for the plugin image (51 → 52; `-v`: no change) | `-v` |
+| `tests/test_kit_zero_egress_install.py:1131` | `python:3.13-slim` | `null` | none possible | `-v` |
+| `tests/test_kit_zero_egress_install.py:1429` | the kit-built edge-plugin image | `/var/lib/edge-plugin` | yes | `-v` |
+| `scripts/kit/live_evidence.py:224` | `python:3.13-slim` | `null` | none possible | `-v` |
+| `scripts/kit/live_evidence.py:323` | the edge-plugin image | `/var/lib/edge-plugin` | yes; and seen live during this gate from another tree (below) | `-v` |
+| `scripts/kit/d5_three_placements.py:350` | `av-ingest` | `/var/lib/av-ingest` | not reproduced (the image is not on this host); the run bind-mounts over the path | `-v` |
+| `tests/test_edge_plugin_container.py:443` | the edge-plugin image (ingest container) | `/var/lib/edge-plugin` | yes | `-v` |
+| `tests/test_edge_plugin_container.py:720`, `:759`, `:766` | the edge-plugin image | `/var/lib/edge-plugin` | none today: a named volume is mounted over the path (removed by name) | `-v` |
+| `tests/test_lockstep_ref.py:396`, `:406` | `altavista-cfs-lockstep:local` | `null` | none possible | `-v` |
+| `tests/test_docker_image_tags.py:187` (grep) | `registry:2` | `{"/var/lib/registry":{}}` | yes by `create` (51 → 52); the test's own run mounts a tmpfs there | `-v` |
+| `tests/test_edge_plugin_hardening_alpine.py:258` (grep) | `alpine:latest` | `null` | none possible | `-v` |
+| `tests/test_proposer_container.py:373` (grep) | `av-proposer:local`, `python:3.13-slim` | `null` both | none possible | `-v` |
+| `crates/av-kernel/tests/drm_board_cfs_restart.rs:110`, `crates/av-sweep/tests/k8s_sweep.rs:477`, `crates/av-jobs/tests/k8s.rs:136` (grep) | the cFS image, `av-sweep-sample:local`, the pinned `alpine` of the k8s pods | `null` each | none possible | `-v`; `cargo-slot check -p av-kernel -p av-sweep -p av-jobs --all-targets`: rc 0, no warning (the lead's ruling) |
+| `services/cfs/build-shim.sh:151`, `services/cfs/build-edge-board.sh:261` | `rust:1.90-bookworm` | no volume | none possible | **unchanged** (the lead's ruling): safe today, and `build-shim.sh` is a cFS copied path, so editing it would re-pin the cFS image for nothing |
+
+`-v` removes only anonymous volumes: measured, a named volume and a bind mount survive `rm -f -v`.
+Dangling volumes were 51 at the worker's start and end; every leaked test volume was removed by its
+recorded name.
+
+### Defects found, and their root causes
+
+1. **The gate's pytest phase failed one test**, `test_kit_wheel_libs.py::test_the_image_step_lists_the_wheel_as_the_files_installs`,
+   with `KeyError: 'optional-container-image'`. Root cause: since `64a003c` the image step always looks
+   for the optional ClickHouse image, so every caller of `verify_all` for the image step needs that
+   verifier; this test called it with none. Neither the worker's brief nor the manager's re-run listed
+   that file among the kit tests (it imports `operator_check` too). Fixed in the test (`ddf3f36`): a
+   read-only fake host without ClickHouse. Every test file that imports the installer modules was then
+   re-run (469 passed, 27 skipped; `test_sbom.py` 86 passed with `cargo` on `PATH`). Lesson: a brief's
+   test list for a shared module is every file that imports it, found by grep.
+2. **Question 261's leak class, reproduced**: an image that declares a `VOLUME`, removed with `rm -f`,
+   leaves an unlabelled anonymous volume. Fixed at every site above (`13200ed`).
+
+### Decisions taken this round (numbered for the lead's log)
+
+1. ClickHouse is verified by the image step only; the files install lists it as `checked by the image
+   step, not here` (L1–L4).
+2. Declared means required, like `versitygw` (L2).
+3. Undeclared, `auto` refuses a ClickHouse image that is not the pin rather than calling it absent;
+   `--moe-store file` is the explicit way past it, and records what it found (L3).
+4. A failed lookup is a refusal under every value.
+5. `moe_store_selection(results, mode)` is the only decision; both records say who decided (L4).
+6. "Enabled" means recorded; a consumer is open (L5).
+7. The `held` machinery is removed after a grep showed nothing else read it; a pins file that still has
+   `held` is a pins-file problem, not silently ignored (L1).
+8. The optional component's printed words come from the pin's own `optional` entry.
+9. The `MoE store:` line is printed by `--build-images` only; `--probe-offline-build` and
+   `--check-operator-supplied` print the list but no selection.
+10. Every `rm -f` gets `-v`, whether or not its image declares a volume today; the two cFS build scripts
+    stay unchanged (the lead's ruling).
+11. The `IMAGE_PACKAGES.txt` header was regenerated, not hand-edited, with the documented `--os` string
+    (a first attempt used the image's `PRETTY_NAME`, which changed the `# os:` line too; the script
+    refused to replace the file and was re-run with the documented value).
+
+### Gates
+
+The gate ran at `6a7a28f` (tasks 1 to 4) with `gate/run_gate.sh`, phases in sequence, each phase's
+whole output captured; the pytest phase was re-run at `ddf3f36` after defect 1. The docker lock was
+never held by the gate itself; tests took it for their own container runs. The longest wait for it was
+842 s, behind other trees' container tests (`drm_board_cfs_restart`, `drm_attitude_control_cfs` from
+`AltaVista-edge`), none of them a compile.
+
+| Gate | Result |
+| --- | --- |
+| `buf breaking proto --against /Users/probe/code/AltaVista/proto` | **clean, exit 0** |
+| `buf lint proto` | **clean, exit 0** |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | **185 binaries, 1945 passed, 0 failed, 4 ignored**, 1776 s |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **clean** |
+| the same clippy for `av-kernel`, `av-run`, `av-sweep` with `--no-default-features` | **clean** each |
+| required-features lint (its steps through `cargo-slot`) | **clean**: 5 groups |
+| `cargo deny check` | **advisories ok, bans ok, licenses ok, sources ok** |
+| `cargo test -p av-orbital --no-default-features` | **15 binaries, 142 passed, 0 failed** |
+| `cargo-slot build -p av-edge-board --bins` | **built** |
+| `cargo test -p av-kernel --no-default-features` | **21 binaries, 769 passed, 0 failed** |
+| `cargo test -p av-kernel --no-fail-fast` | **58 binaries, 1032 passed, 0 failed, 1 ignored**, 585 s |
+| Renode (`drm_attitude_control_renode`) / stand-in HIL (`hil_standin_renode`) | **1 passed / 1 passed** |
+| every `web/js/**/*_check.mjs` | **29 of 33 exit 0**; the four argument-driven harnesses print their usage (`command_panel`, `panels`, `timeline` exit 2; `layers_stream` 1), as before |
+| the real-Chrome viewer tests | **40 passed**, 327 s |
+| `regenerate_compliance.py --check` | **up to date** |
+| pytest at `6a7a28f` | **1803 passed, 1 failed (defect 1), 31 skipped**, 2476 s |
+| pytest at `ddf3f36` | **1802 passed, 0 failed, 33 skipped**, 1158 s |
+
+The re-run's two extra skips, against the first run, are not this round's: `test_renode_private_config.py`
+skipped because the re-run script did not export `AV_RENODE_BIN` (run alone with it afterwards: 4 passed), and
+`test_edge_plugin_container.py:543` skipped because the host-wide `av-edge-plugin:local` tag now names
+`sha256:818e0534…`, not the recorded `ce5d9824…`. The Docker events log shows that tag moved at 00:32:19,
+after a `rust:1.90-bookworm` cross-build and an image build, during the first gate's pytest phase and the
+lead's merge of question 258; this tree's gate runs no image build script, so it is attributed to the other
+process (the test passed in the first run, before the tag moved). The 31 skips of the first run are the visible opt-ins (`AV_KIT_*`, including the three new `AV_KIT_CLICKHOUSE_REAL`
+tests, `AV_SBOM_REBUILD`, the unbuilt proof kit, `AV_CFS_RUN_REPRO_BUILD`, the two cFS build artefacts).
+
+**Dangling volumes**: 51 at the gate's start, 52 at its end. The one new volume (`3ac3c242…`,
+created 00:13:36) appeared during the Chrome-viewer phase, which starts no container. The Docker events
+log puts it in the same second as the removal of `av-live-evidence-ingest-0204df4cb5b2` (the edge-plugin
+image, which declares a `VOLUME`), removed without `-v`: `live_evidence.py:323`'s leak, run by another
+tree that lacks `13200ed`. The pytest re-run left the count at 52 (52 → 52).
+
+### What remains, each with its reason
+
+- **A consumer of the MoE-store selection** in the installed system (L5): the kit carries no
+  `av-sweep`; wiring one (for example `av-sweep` reading `IMAGE_BUILD_RECORD.moe_store`) is open.
+- **The `--moe-store auto` refusal on a host with an unrelated ClickHouse image** is by design (L3); an
+  operator passes `--moe-store file`.
+- **Re-pinning**: the sweep image's copied paths include `crates/av-sweep` and `crates/av-jobs`
+  (`13200ed` changed one token in a test of each), so it is likely stale by commit; the lead's step at
+  the merge.
+- **Compliance**: no SBOM moves for this round; the lead regenerates at the merge regardless.
+- **`target/debug/deps`** grew from 546 to 62,110 entries during the gate, under question 236's threshold.

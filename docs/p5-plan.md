@@ -1533,6 +1533,8 @@ The code head is `1f4d581`; this status section is the only commit after it.
 | 6 | PostGIS | `sha256:f8a700ac…e8dd` | image step, when declared |
 | 7 | numpy 2.5.3 linux/aarch64 wheel | `sha256:c76d5dde…654b` | files step, `--operator-wheels` |
 
+(Superseded 2026-10-19 by question 260: ClickHouse is optional operator-supplied and declarable.)
+
 Python ≥ 3.11 on the installing host is an operator-supplied prerequisite (PSF licence).
 
 ### The no-copyleft inventory
@@ -1702,6 +1704,7 @@ The cFS image's record is current (`dc8eb1d`), so no cFS re-pin is owed.
    - a service image only when declared with `--declare-operator-supplied`.
 
    ClickHouse cannot be declared (question 247).
+   (Superseded 2026-10-19 by question 260: ClickHouse is optional operator-supplied and declarable.)
 8. `--copy-pack gmat` is refused, not taken as a synonym, because the flag promises bytes.
 9. **The GMAT pin is scoped** to leave out `output/`, `__pycache__/` and `bin/api_startup_file.txt`,
    and it adds a symlink count and listing hash. The audit's whole-tree `47095a23…` was taken over a

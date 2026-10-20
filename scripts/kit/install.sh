@@ -25,9 +25,10 @@
 #
 # Images are built by a separate, host-side step of this same installer (question 250(a)): the
 # files install above runs inside the enclave and never gets the Docker socket. On the Docker host:
-#   <kit-dir>/installer/install.sh --build-images <kit-dir> [--image-tag COMPONENT=REF ...]
-#   <kit-dir>/installer/install.sh --probe-offline-build <kit-dir>
-# (install.py hands both flags to image_build.py; its module doc is the specification).
+#   <kit-dir>/installer/install.sh --build-images <kit-dir> [--image-tag COMPONENT=REF ...] [--moe-store auto|file|clickhouse]
+#   <kit-dir>/installer/install.sh --probe-offline-build <kit-dir> [--moe-store auto|file|clickhouse]
+# (install.py hands both flags to image_build.py; its module doc is the specification, including
+# --moe-store: whether the optional operator-supplied ClickHouse image, question 260, selects the MoE store).
 #
 # <kit-dir> is an existing kit (KIT_MANIFEST plus its content, kit_format 5 -- the shape
 # scripts/kit/build_kit.py writes). <target-dir> must not exist yet, or must exist and be empty

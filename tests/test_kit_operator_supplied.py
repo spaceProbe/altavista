@@ -8,12 +8,17 @@ What is proved here, without Docker (a fake runner) and over synthetic trees:
    doc's table and each service's own `IMAGE_DIGEST.md` agree on every digest (so the three records
    cannot drift apart);
 2. what a kit needs is derived from `KIT_MANIFEST` in one place (`requirement_for`), and the build flag
-   `--declare-operator-supplied` records a declaration there (and refuses ClickHouse, unknown names);
+   `--declare-operator-supplied` records a declaration there (it accepts ClickHouse, question 260, and
+   refuses unknown names);
 3. each component's verification is one function returning a typed result: a container image by digest,
    a tree by descriptor -- not required, required and verified, required and missing, required and
    different, a declared service image verified, a declared one missing or different;
 4. both steps print all six lines, a refusal still prints the lines up to it, and the structured list
-   goes into `INSTALL_RECORD` and `IMAGE_BUILD_RECORD`.
+   goes into `INSTALL_RECORD` and `IMAGE_BUILD_RECORD`;
+5. ClickHouse is an optional operator-supplied image (question 260): the image step's `--moe-store
+   auto|file|clickhouse` over present / absent / another image / a failed lookup, `moe_store_selection`
+   (the one decision), the files install's record, a pin perturbation, and (opt-in, real Docker) the real
+   pinned image.
 
 The GMAT tree check itself is tested in `tests/test_kit_install.py`, the image build in
 `tests/test_kit_image_build.py`.
@@ -21,6 +26,7 @@ The GMAT tree check itself is tested in `tests/test_kit_install.py`, the image b
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -64,10 +70,12 @@ def test_the_pins_file_covers_the_six_components_of_the_doc_and_numpys_wheel_and
     assert PINS["gmat-r2026a"]["kind"] == "data-tree"
     assert [PINS[c]["verification"]["step"] for c in ORDER] == ["images", "images", "files", "images", "images", "images", "files"]
     assert PINS["numpy-wheel-linux-aarch64"]["kind"] == "python-wheel"   # item 7: the doc's row is task 6
-    # only ClickHouse is held, and why (question 247)
-    assert {c for c, p in PINS.items() if p.get("held")} == {"clickhouse"}
-    assert PINS["clickhouse"]["held"]["question"] == 247
-    assert operator_check.declarable(PINS) == ["postgis", "versitygw"]
+    # only ClickHouse is optional (question 260); nothing is held (question 247 is closed)
+    assert {c for c, p in PINS.items() if p.get("optional")} == {"clickhouse"}
+    assert not any("held" in p for p in PINS.values())
+    assert PINS["clickhouse"]["optional"] == {
+        "question": 260, "enables": "the ClickHouse MoE (sweep study) store", "otherwise": "the file store"}
+    assert sorted(operator_check.declarable(PINS)) == ["clickhouse", "postgis", "versitygw"]
 
 
 def _doc_table_rows() -> dict[int, str]:
@@ -184,14 +192,15 @@ def test_each_service_pin_equals_the_digest_in_the_services_own_record(cid):
     assert _pin_vs_record_problems(cid, pin, record) == []
 
 
-def test_the_pin_vs_record_check_fails_when_one_hex_digit_of_the_versitygw_digest_differs():
+@pytest.mark.parametrize("cid", ["versitygw", "clickhouse"])
+def test_the_pin_vs_record_check_fails_when_one_hex_digit_of_a_service_digest_differs(cid):
     """Perturbation, on copies: neither the committed pins file nor the committed record is touched."""
-    pin = dict(PINS["versitygw"])
+    pin = dict(PINS[cid])
     record = (REPO_ROOT / pin["source_record"]).read_text(encoding="utf-8")
-    assert _pin_vs_record_problems("versitygw", pin, record) == []
+    assert _pin_vs_record_problems(cid, pin, record) == []
     flipped = pin["digest"][:-1] + ("0" if pin["digest"][-1] != "0" else "1")
     bad = dict(pin, digest=flipped, reference=pin["reference"].replace(pin["digest"], flipped))
-    problems = _pin_vs_record_problems("versitygw", bad, record)
+    problems = _pin_vs_record_problems(cid, bad, record)
     assert any("current Registry reference" in p for p in problems) and any("does not contain the pinned digest" in p for p in problems)
 
 
@@ -221,6 +230,31 @@ def test_the_pins_file_validator_names_what_is_wrong():
     assert any("versitygw.digest" in p for p in problems) and any("postgis.verification" in p for p in problems)
     assert any("also the item" in p for p in problems)
     assert operator_check.pins_problems({}) and operator_check.pins_problems(None)
+
+
+@pytest.mark.parametrize("optional, needle", [
+    ({"question": "260", "enables": "x", "otherwise": "y"}, "clickhouse.optional: must be"),
+    ({"question": 260, "enables": "", "otherwise": "y"}, "clickhouse.optional: must be"),
+    ({"question": 260, "enables": "x"}, "clickhouse.optional: must be"),
+    ({"question": 260, "enables": "x", "otherwise": "y", "extra": 1}, "clickhouse.optional: must be"),
+    ("optional", "clickhouse.optional: must be"),
+])
+def test_the_pins_validator_checks_an_optional_entry(optional, needle):
+    bad = json.loads(json.dumps(PINS))
+    bad["clickhouse"]["optional"] = optional
+    assert any(needle in p for p in operator_check.pins_problems(bad))
+
+
+def test_the_pins_validator_allows_optional_only_on_a_container_image_and_no_longer_knows_held():
+    bad = json.loads(json.dumps(PINS))
+    bad["gmat-r2026a"]["optional"] = PINS["clickhouse"]["optional"]
+    bad["ubuntu-22.04-base-image"]["optional"] = PINS["clickhouse"]["optional"]
+    problems = operator_check.pins_problems(bad)
+    assert any("gmat-r2026a.optional: only a container-image" in p for p in problems)
+    assert any("ubuntu-22.04-base-image.optional: only a container-image" in p for p in problems)
+    old = json.loads(json.dumps(PINS))
+    old["clickhouse"]["held"] = {"question": 247, "summary": "held pending licence review"}
+    assert any("clickhouse.held: no longer supported" in p for p in operator_check.pins_problems(old))
 
 
 # =================================================================================================
@@ -265,9 +299,27 @@ def test_a_service_image_is_required_only_when_the_kit_declares_it():
         assert not none.required and none.outside_kit and "--declare-operator-supplied" in none.why_not
         declared = _req(cid, _doc(declared=[cid]))
         assert declared.required and not declared.outside_kit
-    held = _req("clickhouse", _doc())
-    assert held.outside_kit and held.why_not == "not declared; held pending licence review, q247"
     assert _req("versitygw", _doc(declared=["postgis"])).required is False
+
+
+OPTIONAL_TEXT = ("optional (question 260: enables the ClickHouse MoE (sweep study) store; the file store otherwise)")
+CHECKED_BY_IMAGE_STEP = ("checked by the image step, not here "
+                         "(record: IMAGE_BUILD_RECORD moe_store; this step does not read it)")
+
+
+def test_clickhouse_is_optional_when_undeclared_and_required_when_declared_or_asked_for():
+    none = _req("clickhouse", _doc())
+    assert not none.required and none.optional and not none.outside_kit and none.text == OPTIONAL_TEXT
+    # the words are the pin's own `optional` entry, nowhere else
+    assert none.text == operator_check.optional_text(PINS["clickhouse"])
+    declared = _req("clickhouse", _doc(declared=["clickhouse"]))
+    assert declared.required and declared.optional
+    assert declared.text == "required (declared at build time: --declare-operator-supplied clickhouse)"
+    asked = _req("clickhouse", _doc(), moe_mode="clickhouse")
+    assert asked.required and asked.text == "required (--moe-store clickhouse; question 260)"
+    assert not _req("clickhouse", _doc(), moe_mode="file").required
+    # a service image that is not optional ignores the mode
+    assert not _req("versitygw", _doc(), moe_mode="clickhouse").required
 
 
 def test_the_kit_manifest_records_the_declaration_and_defaults_to_empty(tmp_path):
@@ -301,12 +353,11 @@ def test_build_kit_declares_versitygw_and_postgis_and_a_default_kit_declares_not
 
 
 @pytest.mark.parametrize("name, needle", [
-    ("clickhouse", "held out of the kit: held pending licence review (question 247)"),
     ("nonesuch", "not a component of the pins file"),
     ("gmat-r2026a", "derived from what the kit carries"),
     ("ubuntu-22.04-base-image", "derived from what the kit carries"),
 ])
-def test_build_kit_refuses_to_declare_clickhouse_an_unknown_name_or_a_derived_component_before_writing(tmp_path, capsys, name, needle):
+def test_build_kit_refuses_to_declare_an_unknown_name_or_a_derived_component_before_writing(tmp_path, capsys, name, needle):
     out = tmp_path / "kit"
     with pytest.raises(kmanifest.OperatorSuppliedPackError, match="--declare-operator-supplied") as exc:
         build_kit.build(repo_root=REPO_ROOT, out=out, site=REPO_ROOT / build_kit.DEFAULT_SITE, declare_operator_supplied=[name])
@@ -314,6 +365,59 @@ def test_build_kit_refuses_to_declare_clickhouse_an_unknown_name_or_a_derived_co
     rc = build_kit.main(["--out", str(out), "--declare-operator-supplied", name])
     err = capsys.readouterr().err
     assert rc == 2 and "REFUSED" in err and needle in err and not out.exists()
+
+
+def test_build_kit_accepts_declaring_clickhouse_and_the_declared_list_names_it(tmp_path):
+    assert operator_check.declaration_problems(["clickhouse"], PINS) == []
+    manifest_path, _ = _build(tmp_path, declare_operator_supplied=["clickhouse"])
+    doc = json.loads(manifest_path.read_text())
+    assert doc["operator_supplied_declared"] == ["clickhouse"]
+    assert kmanifest.verify_manifest(manifest_path.parent) == []
+
+
+def _clickhouse_carriers(kit_root: Path) -> set[str]:
+    """Every file of the kit tree that names ClickHouse in its path or in its bytes (case-insensitive)."""
+    found = set()
+    for path in sorted(kit_root.rglob("*")):
+        if path.is_file() and not path.is_symlink():
+            rel = path.relative_to(kit_root).as_posix()
+            if "clickhouse" in rel.lower() or b"clickhouse" in path.read_bytes().lower():
+                found.add(rel)
+    return found
+
+
+@pytest.mark.parametrize("declared", [[], ["clickhouse"]])
+def test_the_kit_never_carries_clickhouse_bytes_declared_or_not(tmp_path, declared):
+    """Question 260: all a kit holds of ClickHouse is the pin (`installer/operator_supplied.json`), the name in
+    `operator_supplied_declared` (when declared), the installer's own code and the kit's document of what
+    the operator brings. No image, layer, image-table entry, SBOM or digest record is ClickHouse's, and no
+    path of the kit names it."""
+    manifest_path, _ = _build(tmp_path, declare_operator_supplied=declared)
+    kit_root = manifest_path.parent
+    doc = json.loads(manifest_path.read_text())
+    assert doc["operator_supplied_declared"] == declared
+    assert sorted(doc["images"]) == [CFS, PLUGIN]
+    assert not [k for section in ("sboms", "packs", "runs", "wheels", "binaries") for k in doc[section] if "clickhouse" in str(k).lower()]
+    assert not [f["path"] for f in doc["files"] if "clickhouse" in f["path"].lower()]
+    carriers = _clickhouse_carriers(kit_root)
+    allowed = {"installer/operator_supplied.json", "installer/operator_check.py", "installer/image_build.py",
+               "installer/install.py", "installer/install.sh", "installer/manifest.py", kmanifest.OPERATOR_DOC_PATH}
+    # KIT_MANIFEST (apart from `git_status`, the list of the builder's dirty files) names it only as the
+    # declaration, and says nothing of it otherwise
+    assert (carriers - allowed - {"KIT_MANIFEST"}) == set(), sorted(carriers)
+    described = json.dumps({k: v for k, v in doc.items() if k != "git_status"}).lower()
+    assert ("clickhouse" in described) == bool(declared)
+    by_path = {f["path"]: f["role"] for f in doc["files"]}
+    assert not [c for c in carriers if by_path.get(c) in ("sbom", "sbom-sums", "image-digest")]
+    # the pinned digest appears only in the pin and the operator document: no record of an image the kit carries
+    hex_digest = PINS["clickhouse"]["digest"].partition(":")[2]
+    with_digest = {p.relative_to(kit_root).as_posix() for p in kit_root.rglob("*")
+                   if p.is_file() and not p.is_symlink() and hex_digest.encode() in p.read_bytes()}
+    assert with_digest == {"installer/operator_supplied.json", kmanifest.OPERATOR_DOC_PATH}
+    assert not (kit_root / "images" / "clickhouse").exists()
+    # a kit that held the 1 GB image would dwarf this
+    assert sum(p.stat().st_size for p in kit_root.rglob("*") if p.is_file()) < 100 * 1024 * 1024
+
 
 
 # =================================================================================================
@@ -427,9 +531,10 @@ def test_the_files_step_prints_every_line_when_nothing_is_needed():
     assert list(lines) == ORDER
     assert lines["ubuntu-22.04-base-image"].endswith("not required (the kit carries no application layer for cfs-image), not verified")
     assert lines["gmat-r2026a"] == "operator-supplied: gmat-r2026a  not required (the kit has no packs.gmat), not verified"
-    assert lines["clickhouse"] == "operator-supplied: clickhouse  outside the kit, not verified (not declared; held pending licence review, q247)"
+    assert lines["clickhouse"] == f"operator-supplied: clickhouse  {OPTIONAL_TEXT}  {CHECKED_BY_IMAGE_STEP}"
     assert lines["versitygw"].startswith("operator-supplied: versitygw  outside the kit, not verified (not declared;")
     assert not any(r.verified for r in results)
+    assert next(r for r in results if r.component == "clickhouse").outcome == "optional-other-step"
 
 
 def test_the_files_step_lists_images_as_the_image_steps_and_verifies_gmat(gmat_world):
@@ -493,11 +598,21 @@ def test_a_malformed_pins_file_is_refused_not_listed(tmp_path):
     assert exc.value.code == "pins-malformed"
 
 
-def test_a_kit_declaring_clickhouse_or_an_unknown_component_is_refused_by_the_installer_too():
-    for name in ("clickhouse", "nonesuch", "gmat-r2026a"):
+def test_a_kit_declaring_an_unknown_component_is_refused_by_the_installer_too():
+    for name in ("nonesuch", "gmat-r2026a"):
         with pytest.raises(install.OperatorSuppliedRefused) as exc:
             install.verify_operator_supplied(_kit_doc(declared=[name]))
         assert exc.value.code == "declared-component-refused", name
+
+
+def test_a_kit_declaring_clickhouse_is_not_refused_by_the_installer_and_lists_it_as_the_image_steps():
+    out: list[str] = []
+    results = install.verify_operator_supplied(_kit_doc(declared=["clickhouse"]), out=out.append)
+    line = _lines(out)["clickhouse"]
+    assert line == (
+        "operator-supplied: clickhouse  required (declared at build time: --declare-operator-supplied clickhouse)  "
+        "verified by the image step, not here (record: IMAGE_BUILD_RECORD operator_supplied; this step does not read it)")
+    assert next(r for r in results if r.component == "clickhouse").outcome == "other-step"
 
 
 def _install_kit(tmp_path, monkeypatch, *, gmat=False, declared=()):
@@ -533,11 +648,71 @@ def test_install_prints_the_list_and_records_it_structured(tmp_path, monkeypatch
     assert list(comps) == ORDER
     assert {c: comps[c]["outcome"] for c in ORDER} == {
         "ubuntu-22.04-base-image": "other-step", "debian-bookworm-slim-base-image": "other-step", "gmat-r2026a": "verified",
-        "clickhouse": "outside-kit", "versitygw": "other-step", "postgis": "outside-kit",
+        "clickhouse": "optional-other-step", "versitygw": "other-step", "postgis": "outside-kit",
         "numpy-wheel-linux-aarch64": "not-required"}
     assert comps["gmat-r2026a"]["verified"] and comps["gmat-r2026a"]["found"] == comps["gmat-r2026a"]["expected"]
     assert comps["versitygw"]["verifies_in"] == "image step" and comps["gmat-r2026a"]["verifies_in"] == "files install"
     assert os_rec["gmat"]["verified"] and os_rec["gmat"]["platform"] == tki.PLATFORM   # the earlier, detailed form is kept
+
+
+def _no_docker(monkeypatch):
+    """The files install holds no Docker socket: any subprocess or docker runner call fails the test."""
+    def boom(*a, **k):
+        raise AssertionError(f"the files install ran a subprocess: {a!r}")
+    monkeypatch.setattr(subprocess, "run", boom)
+    monkeypatch.setattr(subprocess, "Popen", boom)
+    monkeypatch.setattr(image_build, "docker_runner", boom)
+
+
+FILES_MOE_REASON = (
+    "this step holds no Docker socket; ClickHouse is an optional operator-supplied image that only the image step can "
+    "verify (install.sh --build-images), which records the store it selects in IMAGE_BUILD_RECORD.moe_store")
+HOW_TO_ADD = (
+    "load an image saved from exactly " + PINS["clickhouse"]["reference"] + " (`docker load -i <tarball>`; on a connected "
+    "machine: `docker pull " + PINS["clickhouse"]["reference"] + "` then `docker save " + PINS["clickhouse"]["reference"]
+    + " -o clickhouse.tar`), then re-run `install.sh --build-images <kit>`")
+
+
+def test_the_files_install_lists_clickhouse_as_the_image_steps_and_records_the_file_store(tmp_path, monkeypatch, capsys):
+    kit = _install_kit(tmp_path, monkeypatch)
+    _no_docker(monkeypatch)
+    target = tmp_path / "target"
+    assert install.main([str(kit), str(target)]) == 0
+    out = capsys.readouterr().out
+    assert _lines(out.splitlines())["clickhouse"] == f"operator-supplied: clickhouse  {OPTIONAL_TEXT}  {CHECKED_BY_IMAGE_STEP}"
+    record = json.loads((target / "INSTALL_RECORD").read_text())
+    moe = record["installed"]["moe_store"]
+    assert moe["store"] == "file" and moe["clickhouse"]["configured"] is False and moe["clickhouse"]["by"] == "files install"
+    assert moe["clickhouse"]["reason"] == FILES_MOE_REASON and moe["clickhouse"]["how_to_add"] == HOW_TO_ADD
+    assert moe["clickhouse"]["declared"] is False
+    # the image step decides; nothing in the installed system reads the selection yet
+    assert "image step" in moe["decided_by"] and "not this step" in moe["decided_by"]
+    assert "nothing in the installed system reads this selection yet" in moe["consumer"]
+    assert f"MoE store: file -- ClickHouse is not configured: {FILES_MOE_REASON}. To add it: {HOW_TO_ADD}" in out.splitlines()
+    comps = {c["component"]: c for c in record["installed"]["operator_supplied"]["components"]}
+    assert comps["clickhouse"]["outcome"] == "optional-other-step" and comps["clickhouse"]["required"] is False
+
+
+def test_the_files_install_of_a_kit_declaring_clickhouse_says_the_image_step_must_verify_it(tmp_path, monkeypatch, capsys):
+    kit = _install_kit(tmp_path, monkeypatch, declared=["clickhouse"])
+    _no_docker(monkeypatch)
+    target = tmp_path / "target"
+    assert install.main([str(kit), str(target)]) == 0
+    out = capsys.readouterr().out
+    assert "required (declared at build time: --declare-operator-supplied clickhouse)  verified by the image step, not here" in out
+    moe = json.loads((target / "INSTALL_RECORD").read_text())["installed"]["moe_store"]
+    assert moe["store"] == "file" and moe["clickhouse"]["declared"] is True
+    assert "declared at build time" in moe["clickhouse"]["reason"] and "only the image step can verify it" in moe["clickhouse"]["reason"]
+
+
+def test_check_operator_supplied_lists_clickhouse_without_docker_and_exits_0(tmp_path, monkeypatch, capsys):
+    kit = _install_kit(tmp_path, monkeypatch)
+    _no_docker(monkeypatch)
+    out: list[str] = []
+    results = install.check_operator_supplied(kit, out=out.append)
+    assert next(r for r in results if r.component == "clickhouse").outcome == "optional-other-step"
+    assert _lines(out)["clickhouse"].endswith(CHECKED_BY_IMAGE_STEP)
+    assert install.main(["--check-operator-supplied", str(kit)]) == 0
 
 
 def test_install_refuses_with_the_list_up_to_the_refusal_on_stdout_and_the_code_on_stderr(tmp_path, monkeypatch, gmat_world, capsys):
@@ -578,8 +753,14 @@ class ServiceDocker(kib.FakeDocker):
 
     def __init__(self, kit, *, hold=("clickhouse", "versitygw", "postgis")):
         super().__init__(kit)
+        self.unreadable_inspect: set[str] = set()   # references whose `docker image inspect` answers rc 0 and garbage
         for cid in hold:
             self.bases[PINS[cid]["reference"]] = (PINS[cid]["digest"], [PINS[cid]["reference"]])
+
+    def _inspect(self, args):
+        if args[2] in self.unreadable_inspect:
+            return self._ok(b"this is not json")
+        return super()._inspect(args)
 
     def inspected(self) -> list[str]:
         return [a[2] for a, _i in self.calls if a[:2] == ["image", "inspect"]]
@@ -596,7 +777,7 @@ def _declared_kit(tmp_path, declared, *, gmat=False):
     return kit
 
 
-def test_the_image_step_prints_every_line_and_verifies_only_the_bases_when_nothing_is_declared(tmp_path):
+def test_the_image_step_prints_every_line_and_verifies_the_bases_and_the_optional_clickhouse_when_nothing_is_declared(tmp_path):
     kit = kib.make_kit(tmp_path)
     docker = ServiceDocker(kit)
     record, lines = kib.run_step(kit, docker, tmp_path)
@@ -607,11 +788,16 @@ def test_the_image_step_prints_every_line_and_verifies_only_the_bases_when_nothi
     assert out["debian-bookworm-slim-base-image"] == (
         "operator-supplied: debian-bookworm-slim-base-image  required (base of edge-plugin-image)  verified sha256:88200866dfff… via Id")
     assert out["gmat-r2026a"] == "operator-supplied: gmat-r2026a  not required (the kit has no packs.gmat), not verified"
-    for cid in SERVICES:
+    for cid in ("versitygw", "postgis"):
         assert "outside the kit, not verified (not declared;" in out[cid]
-    # the host is asked about the two bases and nothing else: the services are never touched
+    assert out["clickhouse"] == f"operator-supplied: clickhouse  {OPTIONAL_TEXT}  verified sha256:6ded2b2c2f2c… via Id"
+    # the host is asked about the two bases and the optional ClickHouse image: the declared-only services are never touched
     assert sorted(docker.inspected()[:2]) == sorted(b["reference"] for b in bases)
-    assert not {PINS[c]["reference"] for c in SERVICES} & set(docker.inspected())
+    assert PINS["clickhouse"]["reference"] in docker.inspected()
+    assert not {PINS[c]["reference"] for c in ("versitygw", "postgis")} & set(docker.inspected())
+    assert lines[lines.index(out["numpy-wheel-linux-aarch64"]) + 1] == (
+        "MoE store: clickhouse (clickhouse/clickhouse-server@sha256:6ded2b2c2f2c… verified via Id)")
+    assert record["moe_store"]["store"] == "clickhouse" and record["moe_store"]["mode"] == "auto"
     ops = record["operator_supplied"]
     assert ops["step"] == "image step" and ops["declared"] == [] and [c["component"] for c in ops["components"]] == ORDER
     assert record["images"][CFS]["base"]["verified_by"] == "Id"   # the earlier per-image form is kept
@@ -634,7 +820,8 @@ def test_a_declared_service_image_that_the_host_holds_is_verified_by_digest(tmp_
     assert out["versitygw"] == (
         "operator-supplied: versitygw  required (declared at build time: --declare-operator-supplied versitygw)  verified sha256:eb7f786fcd91… via Id")
     assert PINS["versitygw"]["reference"] in docker.inspected()
-    assert PINS["postgis"]["reference"] not in docker.inspected() and PINS["clickhouse"]["reference"] not in docker.inspected()
+    assert PINS["postgis"]["reference"] not in docker.inspected()   # undeclared and not optional: never touched
+    assert PINS["clickhouse"]["reference"] in docker.inspected()    # undeclared but optional: looked for
     versitygw = next(c for c in record["operator_supplied"]["components"] if c["component"] == "versitygw")
     assert versitygw["verified"] and versitygw["expected"] == PINS["versitygw"]["digest"] and versitygw["found"] == PINS["versitygw"]["digest"]
     assert record["operator_supplied"]["declared"] == ["versitygw"]
@@ -703,7 +890,7 @@ def test_the_probe_prints_the_list_too(tmp_path):
     assert list(_lines(lines)) == ORDER
 
 
-def test_the_image_step_refuses_a_kit_without_the_declaration_list_or_with_a_held_component(tmp_path):
+def test_the_image_step_refuses_a_kit_without_the_declaration_list(tmp_path):
     kit = kib.make_kit(tmp_path)
     doc = json.loads((kit / "KIT_MANIFEST").read_text())
     fresh = kmanifest.build_manifest(
@@ -715,9 +902,390 @@ def test_the_image_step_refuses_a_kit_without_the_declaration_list_or_with_a_hel
     with pytest.raises(image_build.KitRefused, match="operator_supplied_declared"):
         kib.run_step(kit, kib.FakeDocker(kit), tmp_path)
 
-    held = _declared_kit(tmp_path / "held", ["clickhouse"])
-    with pytest.raises(image_build.KitRefused, match="declares operator-supplied 'clickhouse' is held out of the kit"):
-        kib.run_step(held, ServiceDocker(held), tmp_path)
+    unknown = _declared_kit(tmp_path / "unknown", ["nonesuch"])
+    with pytest.raises(image_build.KitRefused, match="declares operator-supplied 'nonesuch'"):
+        kib.run_step(unknown, ServiceDocker(unknown), tmp_path)
+
+
+# =================================================================================================
+# 5b. ClickHouse, the optional operator-supplied image (question 260): --moe-store over every situation
+# =================================================================================================
+
+CH = PINS["clickhouse"]
+CH_REPO = CH["reference"].partition("@")[0]
+FLIPPED = CH["digest"][:-1] + ("0" if CH["digest"][-1] != "0" else "1")
+OTHER_ROWS = [
+    {"Repository": CH_REPO, "Tag": "25.3.1.1", "ID": "sha256:" + "a" * 64, "Digest": "sha256:" + "b" * 64, "Size": "1GB"},
+    {"Repository": CH_REPO, "Tag": "<none>", "ID": "sha256:" + "c" * 64, "Digest": "sha256:" + "d" * 64, "Size": "1GB"},
+]
+SITUATIONS = ["present", "absent", "other-by-reference", "other-listed", "lookup-failed", "listing-unreadable", "inspect-unreadable"]
+MODES = ["auto", "file", "clickhouse"]
+_DIFFERS = ("refused", "operator-image-digest-differs")
+_LOOKUP = ("refused", "operator-image-lookup-failed")
+EXPECT = {
+    ("auto", "present"): ("ok", "clickhouse", "verified"),
+    ("file", "present"): ("ok", "file", "not-selected"),
+    ("clickhouse", "present"): ("ok", "clickhouse", "verified"),
+    ("auto", "absent"): ("ok", "file", "not-configured"),
+    ("file", "absent"): ("ok", "file", "not-selected"),
+    ("clickhouse", "absent"): ("refused", "operator-image-missing"),
+    **{(m, s): (_DIFFERS if m != "file" else ("ok", "file", "not-selected"))
+       for m in MODES for s in ("other-by-reference", "other-listed")},
+    **{(m, s): _LOOKUP for m in MODES for s in ("lookup-failed", "listing-unreadable", "inspect-unreadable")},
+}
+
+
+def _world(kit, situation: str) -> ServiceDocker:
+    """The fake Docker host in one of the situations the optional ClickHouse image can be in."""
+    if situation in ("present", "inspect-unreadable"):
+        docker = ServiceDocker(kit)
+        if situation == "inspect-unreadable":
+            docker.unreadable_inspect.add(CH["reference"])
+        return docker
+    docker = ServiceDocker(kit, hold=("versitygw", "postgis"))
+    if situation == "other-by-reference":
+        docker.bases[CH["reference"]] = ("sha256:" + "5" * 64, [CH_REPO + "@sha256:" + "4" * 64])
+    elif situation == "other-listed":
+        docker.listing_rows = list(OTHER_ROWS)
+    elif situation == "lookup-failed":
+        docker.listing_rc = 1
+    elif situation == "listing-unreadable":
+        docker.listing_stdout = b"this is not json\n"
+    else:
+        assert situation == "absent"
+    return docker
+
+
+def _image_step(kit, docker, tmp_path, *args):
+    record = tmp_path / "IMAGE_BUILD_RECORD"
+    rc = image_build.main(["--build-images", str(kit), "--record", str(record), *args], docker=docker)
+    return rc, record
+
+
+def _nothing_pulled_or_changed(docker):
+    return [a for a, _i in docker.calls if a[0] in ("pull", "load", "tag", "rmi", "run", "start", "save")] == []
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("situation", SITUATIONS)
+def test_the_image_step_over_every_moe_store_mode_and_every_clickhouse_situation(tmp_path, capsys, mode, situation):
+    kit = kib.make_kit(tmp_path)
+    docker = _world(kit, situation)
+    rc, record = _image_step(kit, docker, tmp_path, *([] if mode == "auto" else ["--moe-store", mode]))
+    cap = capsys.readouterr()
+    expect = EXPECT[(mode, situation)]
+    out = _lines(cap.out.splitlines())
+    assert _nothing_pulled_or_changed(docker)
+    if expect[0] == "refused":
+        kind = expect[1]
+        assert rc == 2 and f"REFUSED [{kind}]" in cap.err, cap.err
+        # nothing built, nothing created, nothing written, no MoE store chosen
+        assert docker.called("build") == [] and docker.called("create") == [] and not record.exists()
+        assert "MoE store:" not in cap.out
+        assert out["clickhouse"].endswith(f"NOT VERIFIED [{kind.removeprefix('operator-')}]")
+        assert list(out) == ["ubuntu-22.04-base-image", "debian-bookworm-slim-base-image", "gmat-r2026a", "clickhouse"]
+        if kind == "operator-image-digest-differs":
+            assert CH["reference"] in cap.err and CH["digest"] in cap.err and "docker load" in cap.err and "Nothing was enabled" in cap.err
+            assert ("--moe-store file" in cap.err) == (mode == "auto")
+            found = {"other-by-reference": ["5" * 64], "other-listed": ["25.3.1.1", "a" * 64, "b" * 64, "<none>", "c" * 64, "d" * 64]}[situation]
+            assert all(f in cap.err for f in found), cap.err
+        elif kind == "operator-image-missing":
+            assert CH["reference"] in cap.err and CH["digest"] in cap.err and "docker load" in cap.err
+        else:
+            assert "never read as" in cap.err and "Nothing was enabled" in cap.err
+        return
+    _, store, outcome = expect
+    assert rc == 0, cap.err
+    assert list(out) == ORDER                                # the later components are still printed
+    rec = json.loads(record.read_text())
+    moe = rec["moe_store"]
+    comp = next(c for c in rec["operator_supplied"]["components"] if c["component"] == "clickhouse")
+    assert moe["mode"] == mode and moe["store"] == store and comp["outcome"] == outcome
+    assert len(docker.called("build")) == 2 and set(rec["images"]) == {CFS, PLUGIN}   # the images are still built
+    assert cap.out.splitlines()[cap.out.splitlines().index(out["numpy-wheel-linux-aarch64"]) + 1] == operator_check.render_moe_store(moe)
+    requirement = "required (--moe-store clickhouse; question 260)" if mode == "clickhouse" else OPTIONAL_TEXT
+    if outcome == "verified":
+        assert out["clickhouse"] == f"operator-supplied: clickhouse  {requirement}  verified sha256:6ded2b2c2f2c… via Id"
+        assert moe["clickhouse"]["configured"] is True and moe["file_store"] == "available"
+        assert moe["clickhouse"]["digest"] == CH["digest"] and moe["clickhouse"]["verified_by"] == "Id"
+        assert "MoE store: clickhouse (clickhouse/clickhouse-server@sha256:6ded2b2c2f2c… verified via Id)" in cap.out.splitlines()
+    elif outcome == "not-configured":
+        assert out["clickhouse"] == (
+            f"operator-supplied: clickhouse  {OPTIONAL_TEXT}  not configured (not on this Docker host; the MoE store is the file store). "
+            f"To add it: {HOW_TO_ADD}")
+        assert moe["clickhouse"] == {"configured": False, "reason": "not on this Docker host", "how_to_add": HOW_TO_ADD}
+        assert f"MoE store: file -- ClickHouse is not configured: not on this Docker host. To add it: {HOW_TO_ADD}" in cap.out.splitlines()
+    else:
+        assert out["clickhouse"].startswith(f"operator-supplied: clickhouse  {OPTIONAL_TEXT}  not selected (--moe-store file; ")
+        ch = moe["clickhouse"]
+        assert ch["configured"] is False and ch["selected"] is False and ch["outcome"] == "not-selected"
+        found = ch["found"]
+        if situation == "present":
+            assert found["pinned_image_present"] is True and found["inspect"]["Id"] == CH["digest"]
+        elif situation == "absent":
+            assert found == {"inspect": None, "images": [], "pinned_image_present": False}
+        elif situation == "other-listed":
+            assert [(i["tag"], i["id"], i["digest"]) for i in found["images"]] == [
+                ("25.3.1.1", "sha256:" + "a" * 64, "sha256:" + "b" * 64), ("<none>", "sha256:" + "c" * 64, "sha256:" + "d" * 64)]
+            assert "25.3.1.1" in out["clickhouse"]
+        else:
+            assert found["inspect"]["Id"] == "sha256:" + "5" * 64 and found["pinned_image_present"] is False
+        assert any(l.startswith("MoE store: file -- ClickHouse is not selected (--moe-store file); on this Docker host: ")
+                   for l in cap.out.splitlines())
+
+
+def test_the_default_moe_store_is_auto_and_an_unknown_value_is_refused_by_the_parser(tmp_path, capsys):
+    kit = kib.make_kit(tmp_path)
+    rc, record = _image_step(kit, ServiceDocker(kit, hold=("versitygw", "postgis")), tmp_path)
+    assert rc == 0 and json.loads(record.read_text())["moe_store"]["mode"] == "auto"
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as exc:
+        image_build.main(["--build-images", str(kit), "--moe-store", "sometimes"], docker=ServiceDocker(kit))
+    assert exc.value.code == 2 and "invalid choice" in capsys.readouterr().err
+    with pytest.raises(image_build.MoeStoreContradiction, match="not one of"):
+        image_build.build_images(ServiceDocker(kit), kit, out=lambda _l: None, record_path=tmp_path / "r2", moe_store="sometimes")
+
+
+def test_the_lookup_command_is_the_measured_one_and_names_the_repository(tmp_path):
+    kit = kib.make_kit(tmp_path)
+    docker = _world(kit, "absent")
+    image_build.build_images(docker, kit, out=lambda _l: None, record_path=tmp_path / "r")
+    assert docker.called("image", "ls", "--no-trunc", "--digests") == [
+        ["image", "ls", "--no-trunc", "--digests", "--format", "{{json .}}", "clickhouse/clickhouse-server"]]
+    # the inspect of the pinned reference came first, and the listing only because it found nothing
+    ch = [a for a, _i in docker.calls if a[:2] == ["image", "inspect"] and a[2] == CH["reference"]]
+    assert len(ch) == 1
+
+
+# -- declared (and required) ClickHouse
+
+def test_a_declared_clickhouse_that_the_host_holds_is_verified_and_selects_the_clickhouse_store(tmp_path, capsys):
+    kit = _declared_kit(tmp_path, ["clickhouse"])
+    docker = ServiceDocker(kit)
+    rc, record = _image_step(kit, docker, tmp_path)
+    cap = capsys.readouterr()
+    assert rc == 0, cap.err
+    out = _lines(cap.out.splitlines())
+    assert out["clickhouse"] == (
+        "operator-supplied: clickhouse  required (declared at build time: --declare-operator-supplied clickhouse)  "
+        "verified sha256:6ded2b2c2f2c… via Id")
+    rec = json.loads(record.read_text())
+    assert rec["moe_store"]["store"] == "clickhouse" and rec["moe_store"]["mode"] == "auto"
+    assert rec["operator_supplied"]["declared"] == ["clickhouse"]
+    assert "the kit declares it" in rec["moe_store"]["clickhouse"]["how_enabled"]
+
+
+def test_a_declared_clickhouse_the_host_does_not_hold_is_refused_as_versitygw_is(tmp_path, capsys):
+    kit = _declared_kit(tmp_path, ["clickhouse"])
+    docker = ServiceDocker(kit, hold=("versitygw", "postgis"))
+    rc, record = _image_step(kit, docker, tmp_path)
+    cap = capsys.readouterr()
+    assert rc == 2 and "REFUSED [operator-image-missing]" in cap.err and CH["digest"] in cap.err and "docker load" in cap.err
+    assert _lines(cap.out.splitlines())["clickhouse"].endswith("NOT VERIFIED [image-missing]")
+    assert docker.called("build") == [] and not record.exists() and "MoE store:" not in cap.out
+
+
+def test_a_declared_clickhouse_that_is_another_image_is_refused_without_offering_the_file_option(tmp_path, capsys):
+    kit = _declared_kit(tmp_path, ["clickhouse"])
+    docker = _world(kit, "other-listed")
+    rc, record = _image_step(kit, docker, tmp_path)
+    cap = capsys.readouterr()
+    assert rc == 2 and "REFUSED [operator-image-digest-differs]" in cap.err and "--moe-store file" not in cap.err
+    assert docker.called("build") == [] and not record.exists()
+
+
+@pytest.mark.parametrize("flag", ["--build-images", "--probe-offline-build"])
+def test_a_kit_declaring_clickhouse_with_moe_store_file_is_a_contradiction_refused_before_any_docker_call(tmp_path, capsys, flag):
+    kit = _declared_kit(tmp_path, ["clickhouse"])
+    docker = ServiceDocker(kit)
+    rc = image_build.main([flag, str(kit), "--moe-store", "file", *(["--record", str(tmp_path / "rec")] if flag == "--build-images" else [])],
+                          docker=docker)
+    cap = capsys.readouterr()
+    assert rc == 2 and "REFUSED [moe-store-contradiction]" in cap.err
+    assert "declares clickhouse" in cap.err and "contradiction" in cap.err and "--moe-store file" in cap.err
+    assert docker.calls == [] and cap.out == "" and not (tmp_path / "rec").exists()
+
+
+def test_a_kit_not_declaring_clickhouse_accepts_every_moe_store_value_before_any_docker_call(tmp_path):
+    kit = kib.make_kit(tmp_path)
+    plan = image_build.load_kit(kit)
+    for mode in MODES:
+        image_build.check_moe_mode(plan, mode)
+    assert operator_check.moe_mode_problem(plan.doc, plan.pins, "file") is None
+
+
+def test_the_probe_prints_the_list_with_the_optional_clickhouse_line_and_writes_no_record(tmp_path, monkeypatch):
+    kit = kib.make_kit(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    lines: list[str] = []
+    docker = kib.ProbeDocker(kit, outcome=kib.GOOD)
+    docker.listing_rows = []
+    image_build.probe_offline_build(docker, kit, out=lines.append)
+    assert _lines(lines)["clickhouse"] == (
+        f"operator-supplied: clickhouse  {OPTIONAL_TEXT}  not configured (not on this Docker host; the MoE store is the file store). "
+        f"To add it: {HOW_TO_ADD}")
+    assert not list(tmp_path.glob("IMAGE_BUILD_RECORD*"))
+    # another ClickHouse image refuses the probe too (auto), --moe-store file lets it go on
+    docker2 = kib.ProbeDocker(kit, outcome=kib.GOOD)
+    docker2.listing_rows = list(OTHER_ROWS)
+    with pytest.raises(image_build.OperatorImageDigestDiffers):
+        image_build.probe_offline_build(docker2, kit, out=lambda _l: None)
+    assert docker2.called("build") == []
+    image_build.probe_offline_build(docker2, kit, out=lambda _l: None, moe_store="file")
+
+
+# -- the one decision
+
+def _ch_result(outcome: str, *, required: bool = False) -> operator_check.Verification:
+    detail = {"reference": CH["reference"], "digest": CH["digest"], "image_id": CH["digest"], "verified_by": "Id",
+              "how_to_add": HOW_TO_ADD, "otherwise": "the file store"}
+    return operator_check.Verification(
+        component="clickhouse", item=4, kind="container-image", step="images", outcome=outcome, required=required,
+        requirement="x", reason="not on this Docker host" if outcome == "not-configured" else "r", detail=detail,
+        found={"inspect": None, "images": [], "pinned_image_present": False},
+    )
+
+
+OUTCOMES = ["verified", "refused", "other-step", "optional-other-step", "not-required", "outside-kit", "not-configured", "not-selected"]
+SELECTS = {("verified", "auto"): "clickhouse", ("verified", "clickhouse"): "clickhouse",
+           ("not-configured", "auto"): "file", ("not-selected", "file"): "file"}
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("outcome", OUTCOMES)
+def test_moe_store_selection_selects_clickhouse_only_for_a_verified_result(outcome, mode):
+    results = [_ch_result(outcome)]
+    if (outcome, mode) not in SELECTS:
+        with pytest.raises(AssertionError, match="cannot reach the MoE store decision"):
+            operator_check.moe_store_selection(results, mode)
+        return
+    selection = operator_check.moe_store_selection(results, mode)
+    assert selection["store"] == SELECTS[(outcome, mode)] and selection["mode"] == mode
+    assert (selection["store"] == "clickhouse") == (outcome == "verified")
+    assert selection["decided_by"] == "image step" and "nothing in the installed system reads this selection yet" in selection["consumer"]
+    assert selection["clickhouse"]["configured"] is (outcome == "verified")
+
+
+def test_moe_store_selection_with_no_clickhouse_pin_is_the_file_store_and_a_bad_mode_is_an_error():
+    assert operator_check.moe_store_selection([], "auto")["store"] == "file"
+    with pytest.raises(ValueError):
+        operator_check.moe_store_selection([_ch_result("verified")], "sometimes")
+
+
+# -- a pin perturbation is caught, nothing is enabled
+
+def test_a_perturbed_clickhouse_pin_is_refused_against_a_host_holding_the_real_image(tmp_path, capsys):
+    pins = json.loads((KIT_DIR / "operator_supplied.json").read_text())
+    bad = json.loads(json.dumps(pins))
+    bad["components"]["clickhouse"]["digest"] = FLIPPED
+    bad["components"]["clickhouse"]["reference"] = CH["reference"].replace(CH["digest"], FLIPPED)
+    assert operator_check.pins_problems(bad["components"]) == []      # the perturbed pins file is well formed
+    pins_path = tmp_path / "pins.json"
+    pins_path.write_text(json.dumps(bad))
+    kit = kib.make_kit(tmp_path)
+
+    def world():
+        docker = ServiceDocker(kit)     # holds the REAL pinned image, by reference, and lists it
+        docker.listing_rows = [{"Repository": CH_REPO, "Tag": "26.8.29.10", "ID": CH["digest"], "Digest": CH["digest"]}]
+        return docker
+
+    docker = world()
+    lines: list[str] = []
+    with pytest.raises(image_build.OperatorImageDigestDiffers) as exc:
+        image_build.build_images(docker, kit, out=lines.append, record_path=tmp_path / "rec", pins_file=pins_path)
+    assert CH["digest"] in str(exc.value) and FLIPPED in str(exc.value) and "Nothing was enabled" in str(exc.value)
+    assert docker.called("build") == [] and not (tmp_path / "rec").exists() and not any(l.startswith("MoE store:") for l in lines)
+    assert _lines(lines)["clickhouse"].endswith("NOT VERIFIED [image-digest-differs]")
+    # control: the same host with the real pins verifies and selects ClickHouse
+    record = image_build.build_images(world(), kit, out=lambda _l: None, record_path=tmp_path / "rec2")
+    assert record["moe_store"]["store"] == "clickhouse"
+    # and with --moe-store file the perturbed pin refuses nothing and enables nothing
+    record = image_build.build_images(
+        world(), kit, out=lambda _l: None, record_path=tmp_path / "rec3", pins_file=pins_path, moe_store="file")
+    assert record["moe_store"]["store"] == "file" and record["moe_store"]["clickhouse"]["found"]["images"][0]["digest"] == CH["digest"]
+
+
+# =================================================================================================
+# 5c. The real ClickHouse image on this Docker host (opt-in: AV_KIT_CLICKHOUSE_REAL=1, read-only commands)
+# =================================================================================================
+
+def _docker_answers() -> bool:
+    try:
+        return subprocess.run(["docker", "info"], capture_output=True, timeout=60).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+real_clickhouse = pytest.mark.skipif(
+    os.environ.get("AV_KIT_CLICKHOUSE_REAL") != "1" or not _docker_answers(),
+    reason="set AV_KIT_CLICKHOUSE_REAL=1 with a Docker daemon that answers (run under with_docker_lock.py; read-only docker commands)")
+
+
+def _real_results(pins: dict, mode: str = "auto"):
+    out: list[str] = []
+    doc = {"images": {}, "packs": {}, "operator_supplied_declared": []}
+    docker = image_build.docker_runner
+
+    def verify_optional(pin_id, pin, requirement):
+        return operator_check.verify_optional_image(docker, pin_id, pin, requirement, mode)
+
+    def verify(pin_id, pin, requirement):
+        return operator_check.verify_image(docker, pin_id, pin, requirement)
+
+    try:
+        results = operator_check.verify_all(
+            operator_check.STEP_IMAGES, doc, pins,
+            verifiers={"container-image": verify, "container-base-image": verify, operator_check.OPTIONAL_IMAGE: verify_optional},
+            out=out.append, moe_mode=mode)
+    except operator_check.ComponentRefused as e:
+        return e.results, out, e.result
+    return results, out, None
+
+
+@real_clickhouse
+def test_real_docker_the_pinned_clickhouse_image_verifies_and_selects_the_clickhouse_store():
+    results, out, refused = _real_results(PINS)
+    assert refused is None
+    ch = next(r for r in results if r.component == "clickhouse")
+    assert ch.outcome == "verified" and ch.detail["verified_by"] == "Id" and ch.found == CH["digest"]
+    assert operator_check.render_line(ch) == f"operator-supplied: clickhouse  {OPTIONAL_TEXT}  verified sha256:6ded2b2c2f2c… via Id"
+    selection = operator_check.moe_store_selection(results)
+    assert selection["store"] == "clickhouse"
+    print("\nREAL (i):", operator_check.render_line(ch), "|", operator_check.render_moe_store(selection))
+
+
+@real_clickhouse
+def test_real_docker_a_pin_with_one_digit_changed_is_refused_naming_the_real_image():
+    bad = json.loads(json.dumps(PINS))
+    bad["clickhouse"]["digest"] = FLIPPED
+    bad["clickhouse"]["reference"] = CH["reference"].replace(CH["digest"], FLIPPED)
+    results, out, refused = _real_results(bad)
+    assert refused is not None and refused.code == "image-digest-differs" and refused.component == "clickhouse"
+    assert any(i["tag"] == "26.8.29.10" and i["id"] == CH["digest"] and i["digest"] == CH["digest"] for i in refused.found["images"])
+    assert CH["digest"] in refused.reason and FLIPPED in refused.reason
+    assert not any(r.verified and r.component == "clickhouse" for r in results)
+    # --moe-store file records the same finding and enables nothing
+    results, out, refused = _real_results(bad, "file")
+    assert refused is None
+    ch = next(r for r in results if r.component == "clickhouse")
+    assert ch.outcome == "not-selected" and operator_check.moe_store_selection(results, "file")["store"] == "file"
+    print("\nREAL (ii):", refused and refused.reason, "|", operator_check.render_line(ch))
+
+
+@real_clickhouse
+def test_real_docker_a_repository_the_host_does_not_hold_is_not_configured_and_the_store_is_file():
+    import uuid
+    bad = json.loads(json.dumps(PINS))
+    repo = f"av-test-absent-{uuid.uuid4().hex}/clickhouse-server"
+    bad["clickhouse"]["reference"] = f"{repo}@{CH['digest']}"
+    results, out, refused = _real_results(bad)
+    assert refused is None
+    ch = next(r for r in results if r.component == "clickhouse")
+    assert ch.outcome == "not-configured" and ch.reason == "not on this Docker host"
+    assert ch.found == {"inspect": None, "images": [], "pinned_image_present": False}
+    selection = operator_check.moe_store_selection(results)
+    assert selection["store"] == "file" and selection["clickhouse"]["configured"] is False
+    print("\nREAL (iii):", operator_check.render_line(ch), "|", operator_check.render_moe_store(selection))
 
 
 # =================================================================================================

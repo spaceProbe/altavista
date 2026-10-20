@@ -221,7 +221,7 @@ def _fetch_json_via_container_network(run_id: str, target_container: str, script
             *_label_args(run_id), PROBE_IMAGE, "python3", "-c", script,
         )
     finally:
-        subprocess.run(["docker", "rm", "-f", probe_name], capture_output=True, timeout=30)
+        subprocess.run(["docker", "rm", "-f", "-v", probe_name], capture_output=True, timeout=30)
     return json.loads(raw.stdout.strip().splitlines()[-1])
 
 
@@ -320,7 +320,8 @@ def bring_up_av_ingest_server(kit_dir: Path, run_id: str) -> dict:
         evidence_body = _fetch_json_via_container_network(run_id, ingest_container, _EVIDENCE_FETCH_SCRIPT)
         verify_body = _fetch_json_via_container_network(run_id, ingest_container, _VERIFY_FETCH_SCRIPT)
     finally:
-        subprocess.run(["docker", "rm", "-f", ingest_container], capture_output=True, timeout=30)
+        # `-v`: the edge-plugin image declares a `VOLUME`; without it each run left an anonymous volume (question 261).
+        subprocess.run(["docker", "rm", "-f", "-v", ingest_container], capture_output=True, timeout=30)
         subprocess.run(["docker", "network", "rm", network_name], capture_output=True, timeout=30)
         try:
             image_tags.remove_test_only_tags()

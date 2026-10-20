@@ -255,7 +255,7 @@ def _run_hardening_flags_produce_the_expected_posture_on_this_docker_colima_host
               f"{json.dumps(exec_facts)}")
     finally:
         if created_container:
-            subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=30)
+            subprocess.run(["docker", "rm", "-f", "-v", container_name], capture_output=True, timeout=30)
         if created_volume:
             subprocess.run(["docker", "volume", "rm", volume_name], capture_output=True, timeout=30)
 

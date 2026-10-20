@@ -1,11 +1,12 @@
-"""Question 245 (heavy-ct round 1a) and question 247: the pinned ClickHouse server image's record
-(`services/clickhouse/IMAGE_DIGEST.md`, `IMAGE_PACKAGES.txt`), and the ruling that the air-gap kit
+"""Question 245 (heavy-ct round 1a), question 247 and question 260: the pinned ClickHouse server image's
+record (`services/clickhouse/IMAGE_DIGEST.md`, `IMAGE_PACKAGES.txt`), and the ruling that the air-gap kit
 does NOT carry the image.
 
-Question 247: the user holds the ClickHouse image out of the kit pending a licence review of the
-statically linked LGPL libraries in its binary. The record, the package inventory and the licence
-section stay as input for that review; the kit's image components are `edge-plugin-image` and
-`cfs-image` only.
+Question 260 (closing question 247 without a licence review): ClickHouse is an optional operator-supplied
+image. Its binary statically links LGPL libraries and the kit redistributes no GPL or LGPL code (question
+251), so the kit never carries it; the operator loads the pinned digest on the Docker host and the installer's
+image step verifies it. The record, the package inventory and the licence section stay as the pin and the
+operator's reference; the kit's image components are `edge-plugin-image` and `cfs-image` only.
 
 Everything here reads committed files; nothing touches Docker, git history or the network.
 """
@@ -70,24 +71,30 @@ def test_the_record_is_pinned_by_digest_and_internally_consistent():
 
 def test_the_record_says_the_kit_does_not_carry_the_image_and_keeps_the_licence_inventory():
     text = DIGEST_MD.read_text()
-    assert "does NOT carry this image" in text and "question 247" in text.lower()
-    # The licence review's input stays: the section and the statically linked LGPL libraries.
+    assert "does NOT carry this image" in text and "question 260" in text.lower()
+    assert "operator-supplied" in text and "IMAGE_BUILD_RECORD.moe_store" in text
+    # No licence review is held open for it any more: question 247 is closed by 260.
+    assert "pending a licence review" not in text and "the user holds" not in text.lower()
+    # The licence inventory stays as the operator's reference: the section and the statically linked LGPL libraries.
     assert "## Licence" in text and "## Package inventory" in text
     for library in ("lemmagen-c", "libgsasl", "libssh", "mariadb-connector-c", "numactl", "xz"):
         assert f"`{library}`" in text, library
 
 
 def test_the_kit_does_not_carry_the_clickhouse_image():
-    """Question 247: the ClickHouse image is held out of the air-gap kit pending the user's licence
-    review. Putting it back into either table is a deliberate change that needs the user's ruling:
-    update this test and `services/clickhouse/IMAGE_DIGEST.md` in the same change."""
+    """Question 260 (closing 247): ClickHouse is an optional operator-supplied image. The kit redistributes no
+    GPL or LGPL code (question 251) and the server binary statically links LGPL libraries, so the kit never
+    carries the image or any part of it, declared or not. Putting it into either table is a deliberate
+    change that needs the user's ruling: update this test and `services/clickhouse/IMAGE_DIGEST.md` in the
+    same change. (`tests/test_kit_operator_supplied.py` builds kits, with and without the declaration, and
+    checks their tree.)"""
     assert "clickhouse-image" not in build_kit.IMAGE_DIGEST_SOURCES, (
-        "question 247: the ClickHouse image is held out of the kit pending the user's licence review"
+        "question 260: the kit never carries the ClickHouse image (operator-supplied)"
     )
     assert "clickhouse-image" not in sbom.IMAGE_COMPONENTS, (
-        "question 247: the ClickHouse image is held out of the kit pending the user's licence review"
+        "question 260: the kit never carries the ClickHouse image (operator-supplied)"
     )
-    assert "clickhouse-image" not in sbom.all_component_names(), "question 247: held out of the kit"
+    assert "clickhouse-image" not in sbom.all_component_names(), "question 260: operator-supplied, not in the kit"
 
 
 def test_extract_image_packages_keeps_only_installed_packages_and_is_deterministic():

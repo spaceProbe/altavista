@@ -107,7 +107,7 @@ impl Container {
 
 impl Drop for Container {
     fn drop(&mut self) {
-        let _ = Command::new("docker").args(["rm", "-f", &self.name]).output();
+        let _ = Command::new("docker").args(["rm", "-f", "-v", &self.name]).output();
     }
 }
 

@@ -89,7 +89,14 @@ one line for each of the six through `verify_operator_supplied`:
 
     operator-supplied: ubuntu-22.04-base-image  required (base of cfs-image)  verified by the image step, not here (record: IMAGE_BUILD_RECORD operator_supplied; this step does not read it)
     operator-supplied: gmat-r2026a  required (packs.gmat)  verified macos-arm64 sha256:d21cddbbffbd… 2060 files
-    operator-supplied: clickhouse  outside the kit, not verified (not declared; held pending licence review, q247)
+    operator-supplied: versitygw  outside the kit, not verified (not declared; a site that deploys it builds the kit with --declare-operator-supplied versitygw)
+    operator-supplied: clickhouse  optional (question 260: enables the ClickHouse MoE (sweep study) store; the file store otherwise)  checked by the image step, not here (record: IMAGE_BUILD_RECORD moe_store; this step does not read it)
+
+ClickHouse (question 260) is an optional operator-supplied image: the kit never carries it, and only the image
+step, which holds the Docker socket, can look for it. This install therefore records
+`INSTALL_RECORD.installed.moe_store` as the file store with ClickHouse not configured BY THIS STEP, says that the
+image step decides the store (`IMAGE_BUILD_RECORD.moe_store`, `install.sh --build-images --moe-store ...`), and
+that nothing in the installed system reads the selection yet; `main` prints a matching `MoE store: ...` line.
 
 This step verifies trees (GMAT); container images are verified by the host-side image step, which
 prints the same six lines with the roles reversed. Together the two outputs cover every component: a
@@ -842,6 +849,8 @@ def install(
     record["installed"]["images"] = _images_record(doc, kit_manifest_sha256)
     # One entry per component of the pins file, each the result of its own verification function.
     record["installed"]["operator_supplied"] = _operator_supplied_record(operator_results, doc, gmat_root, gmat_variant)
+    # Question 260: the files install does not decide the MoE store; the image step does.
+    record["installed"]["moe_store"] = operator_check.moe_store_files_install(operator_results)
     record_path = target_dir / "INSTALL_RECORD"
     record_path.write_text(json.dumps(record, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
     return record
@@ -918,6 +927,7 @@ def main(argv: "list[str] | None" = None) -> int:
         print("GMAT not needed by this kit")
     for w in record["installed"]["operator_wheels"]:
         print(f"operator-supplied wheel {w['filename']} (sha256:{w['sha256'][:12]}…) verified and installed from {w['installed_from']}")
+    print(operator_check.render_moe_store(record["installed"]["moe_store"]))
     print(f"wrote {args.target_dir / 'INSTALL_RECORD'}")
     return 0
 

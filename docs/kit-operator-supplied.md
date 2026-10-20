@@ -8,8 +8,9 @@ names each one, pins it, and verifies what the operator brings.
 
 Audited 2026-10-17 at `develop` `999d86e`; revised 2026-10-17 to describe the kit as `edge` builds it
 at `b08e869` (question 250(a), tasks 1a to 7), with the changes of task 6 on top. This is an
-engineering inventory, not legal advice; the licence reviews themselves are the user's (questions 6
-and 247).
+engineering inventory, not legal advice; the licence reviews themselves are the user's (question 6).
+Question 247 (ClickHouse) is closed by question 260 without a review: the kit never carries ClickHouse,
+so there is nothing for the kit to review (item 4).
 
 The kit carries this file at its root, as `kit-operator-supplied.md`, byte for byte (listed in
 `KIT_MANIFEST.files` with the role `operator-doc` and hashed like every file). The installer refuses
@@ -28,7 +29,9 @@ component in the table below comes from the operator.
      (`pip download` of exactly the pinned file; refuses unless its name and sha256 match;
      writes `DIR/SHA256SUMS`);
    - GMAT R2026a (item 3), downloaded and unpacked;
-   - a service image (items 5 and 6), only if the site deploys that service, by its digest.
+   - a service image (items 5 and 6), only if the site deploys that service, by its digest;
+   - the ClickHouse image (item 4, optional), only if the site wants the ClickHouse MoE (sweep
+     study) store: `docker pull` and `docker save` of its pinned digest (see "Items 4 to 6").
 
    The two helpers live in the repository's `scripts/kit/`; the kit does not carry them. The kit
    carries the pins (`installer/operator_supplied.json`) and this document, which is what an
@@ -69,7 +72,9 @@ component in the table below comes from the operator.
 7. **Which components a kit needs** follows from what it carries: a base image for each image
    application layer it carries, GMAT when it records the `gmat` pack, the wheel when the wheel step
    found a GPL-family library in it, and a service image only when the kit was built with
-   `build_kit.py --declare-operator-supplied NAME` (see "Items 4 to 6").
+   `build_kit.py --declare-operator-supplied NAME` (see "Items 4 to 6"). ClickHouse (item 4) is
+   optional: undeclared, the image step looks for it on the Docker host and the operator loads it
+   there only if the site wants the ClickHouse MoE store; declared, it is required like item 5.
 
 ## Components the operator brings
 
@@ -78,7 +83,7 @@ component in the table below comes from the operator.
 | 1 | Ubuntu 22.04 base image (under the cFS image) | OS userland in the image's base layers | GPL-2.0/3.0 (e.g. `grep`, `gzip`, `util-linux`, `procps`, `dpkg`, `apt`), LGPL-2.1 (`libc6`, `libgnutls30`, `libgpg-error0`) | `ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc` |
 | 2 | Debian 12 bookworm-slim base image (under the edge-plugin image) | OS userland in the image's base layers | GPL (e.g. `bash`, `coreutils`, `tar`, `sed`, `findutils`, `login`), LGPL (`libc6`, `libgnutls30`, `libgmp10`) | `debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171` |
 | 3 | GMAT R2026a | Bundles OpenSceneGraph (`libosg*`, `libOpenThreads`, `osgdb_*` plugins) and wxWidgets (`libwx_*`) | OSGPL (LGPL-2.1 with extra permissions), wxWindows Library Licence (LGPL-2.0+ with a binary exception); GMAT itself is Apache-2.0 | content hash of the unpacked tree under a scope, per platform, below |
-| 4 | ClickHouse server (only where the MoE store is deployed) | Static LGPL libraries in the server binary | LGPL (libgsasl, libssh, mariadb-connector-c, numactl, xz, lemmagen-c), GPL-2.0-or-BSD (ittapi), MPL-2.0; ClickHouse itself is Apache-2.0 | `clickhouse/clickhouse-server@sha256:6ded2b2c2f2c46f12784bd8000c75f8aa7363372ed64afccaa932456b8cb41e4` (26.8.29.10 LTS; arm64 manifest `sha256:b4e4a09d5c05a17640315aeb72aeab3fe03c96a937f414526a7c1ebda3201cb0`). Held out of the kit pending the user's review (question 247) |
+| 4 | ClickHouse server (optional: only where the site wants the ClickHouse MoE store) | Static LGPL libraries in the server binary | LGPL (libgsasl, libssh, mariadb-connector-c, numactl, xz, lemmagen-c), GPL-2.0-or-BSD (ittapi), MPL-2.0; ClickHouse itself is Apache-2.0 | `clickhouse/clickhouse-server@sha256:6ded2b2c2f2c46f12784bd8000c75f8aa7363372ed64afccaa932456b8cb41e4` (26.8.29.10 LTS; arm64 manifest `sha256:b4e4a09d5c05a17640315aeb72aeab3fe03c96a937f414526a7c1ebda3201cb0`). Operator-supplied and optional (question 260); the kit never carries it |
 | 5 | Versity Gateway `versitygw` S3 server (only where the heavy track's object store is deployed) | Network service; the upstream image's Alpine 3.24.2 base layers carry GPL-2.0-only packages (question 251) | Versity Gateway is Apache-2.0. Base layers: GPL-2.0-only (`busybox`, `busybox-binsh`, `ssl_client`, `apk-tools`, `libapk`, `alpine-baselayout`, `alpine-baselayout-data`, `scanelf`), MIT AND BSD-2-Clause AND GPL-2.0-or-later (`musl-utils`), MPL-2.0 AND MIT (`ca-certificates-bundle`), MIT, Apache-2.0 or Zlib for the rest (`alpine-keys`, `alpine-release`, `musl`, `libcrypto3`, `libssl3`, `zlib`) | `versity/versitygw@sha256:eb7f786fcd91e72194e48fcf1ac16302d686bf8e3a71434bdbc067a6efd3fdc7` (`v1.9.0`, revision `ca4c8d30f579a5ac3dd8c91bbfa8340c69dac0ac`). Replaces MinIO (question 256) |
 | 6 | PostgreSQL + PostGIS (only where the catalog is deployed) | Network service | PostGIS is GPL-2.0-or-later (PostgreSQL itself is the permissive PostgreSQL licence), run unmodified over the Postgres wire protocol | `imresamu/postgis@sha256:f8a700accce9a1fb24e14b73a3abf8e90439ce8f192c57b8cb93cc650694e8dd` (`17-3.5-alpine`, PostGIS 3.5.4) |
 | 7 | numpy 2.5.3 wheel for linux/aarch64/cp313 (only for a kit built with `--with-wheels`) | The wheel bundles `libgfortran`, GPL code | `libgfortran`: GPL-3.0-or-later WITH GCC-exception-3.1. The wheel's other bundled library, OpenBLAS, is BSD-3-Clause AND BSD-3-Clause-Open-MPI; numpy itself is BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | `numpy-2.5.3-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl`, `sha256:c76d5dde9f445058f83d0c02af00557a4db91de9a9a57c0df87d1535001d654b`, from PyPI |
@@ -204,10 +209,47 @@ lead; it is not part of this item. The pin replaces MinIO's (AGPL-3.0; its diges
 fetched, question 255); `services/store/IMAGE_DIGEST.md` keeps MinIO's old digest under its History
 section, and the pin matches the record's current Registry reference, not the history.
 
-ClickHouse (item 4) cannot be declared: the builder refuses the name and the installer refuses a
-manifest that declares it (question 247, held pending the user's licence review). Its digest and
-arm64 manifest digest are pinned here and in the pins file so they are recorded; the list reports it
-as outside the kit.
+**ClickHouse (item 4) is operator-supplied and optional (question 260).** Question 260 closes question
+247 without a licence review: the server binary statically links LGPL libraries (`libgsasl`, `libssh`,
+`mariadb-connector-c`, `numactl`, `xz`, `lemmagen-c`) and the kit redistributes no GPL or LGPL code
+(question 251), so the kit never carries the image or any part of it, declared or not. The operator
+obtains the pinned image,
+`clickhouse/clickhouse-server@sha256:6ded2b2c2f2c46f12784bd8000c75f8aa7363372ed64afccaa932456b8cb41e4`
+(26.8.29.10 LTS; the arm64 manifest digest is `sha256:b4e4a09d5c05a17640315aeb72aeab3fe03c96a937f414526a7c1ebda3201cb0`),
+and loads it on the Docker host. The operator's use of ClickHouse is under its own licences. Question 6's
+Redpanda review is unaffected.
+
+It is optional. Only the host-side image step can look for it, because the files install has no Docker
+socket; the files install lists it as `checked by the image step, not here` and records the file store
+with ClickHouse not configured by that step (`INSTALL_RECORD.installed.moe_store`). The image step takes
+`install.sh --build-images <kit> [--moe-store auto|file|clickhouse]`, default `auto`:
+
+| `--moe-store` | the pinned image is on the host | another ClickHouse image is on the host | no ClickHouse image |
+|---|---|---|---|
+| `auto` (the kit does not declare it) | `verified`; MoE store `clickhouse` | refused `operator-image-digest-differs`, naming `--moe-store file` | `not configured`; MoE store `file`; says how to add it; the walk continues, exit 0 |
+| `file` | `not selected` (what was found is recorded); store `file` | `not selected` (recorded); store `file` | `not selected`; store `file` |
+| `clickhouse`, or the kit declares it | `verified`; store `clickhouse` | refused `operator-image-digest-differs` | refused `operator-image-missing` |
+
+`file` never selects ClickHouse and never refuses for it. `clickhouse` requires the pin as if the kit
+declared it. A lookup that fails (`docker image ls` or the inspect output unreadable) is refused
+`operator-image-lookup-failed` under every value; it is never read as "absent". `--moe-store file` on a kit
+that declares ClickHouse (`build_kit.py --declare-operator-supplied clickhouse`, which makes it required
+like item 5) contradicts the kit and is refused `moe-store-contradiction` before any docker call. Nothing
+is pulled, loaded or removed for it.
+
+To add it: on a connected machine `docker pull clickhouse/clickhouse-server@sha256:6ded2b2c2f2c46f12784bd8000c75f8aa7363372ed64afccaa932456b8cb41e4`
+and `docker save` it to a tarball (`services/clickhouse/IMAGE_DIGEST.md` records the measured tarball and
+the alias to use), carry the tarball across the air gap, `docker load -i` it on the Docker host, and re-run
+`install.sh --build-images <kit>`. The image step prints the `operator-supplied: clickhouse ...` line in
+the list, then one `MoE store: ...` line after it (for example `MoE store: clickhouse
+(clickhouse/clickhouse-server@sha256:6ded2b2c2f2c… verified via Id)`), and writes the selection to
+`IMAGE_BUILD_RECORD.moe_store` (`mode`, `store`, what was found about ClickHouse). `scripts/kit/README.md`
+("ClickHouse and `--moe-store`") has the printed lines.
+
+**Nothing in the installed system reads the selection yet.** "Selected" and "enabled" mean recorded in
+`IMAGE_BUILD_RECORD.moe_store`. The kit carries no `av-sweep`, and `av-sweep` selects its store by its own
+flags (`--store-dir`, `--store-clickhouse`). A consumer of the recorded selection is open; the installed
+system does not use ClickHouse because of it.
 
 ### Item 7: wheels that bundle GPL-family libraries
 
@@ -378,8 +420,12 @@ and every wheel's bundled libraries are inventoried (task 5, `03f0504`).
 - The kit-inventory proof does not open an archive nested inside a wheel or crate, other than the
   `ar` libraries and the `.deb`; it found none in the proof kit.
 - The dynamic-linking statement about the two cross-built binaries is from the first audit.
-- The licence reviews, including that of the `libssl3` ruling and ClickHouse (question 247), are the
-  user's.
+- The licence reviews, including that of the `libssl3` ruling, are the user's (question 6's Redpanda
+  review is unaffected). ClickHouse needs none: question 260 closed question 247 because the kit never
+  carries it.
+- No consumer of the MoE-store selection exists in the installed system: the image step records
+  `IMAGE_BUILD_RECORD.moe_store`, the kit carries no `av-sweep`, and `av-sweep` selects its store by its own
+  flags (`--store-dir`, `--store-clickhouse`).
 
 ## To make the kit match
 
@@ -404,4 +450,8 @@ and every wheel's bundled libraries are inventoried (task 5, `03f0504`).
 7. **Prove it.** Done: `b08e869` (the kit carries no base-image content, and the markers are
    true), `3594bf5` (the viewer's undeclared dependencies, found by the zero-egress proof) and the
    zero-egress proof passing.
-8. **Open: ClickHouse review (question 247); regeneration of the committed SBOMs.**
+8. **ClickHouse: closed by question 260** (operator-supplied and optional, no licence review; the
+   image step's `--moe-store`); no committed SBOM lists ClickHouse or any service image, so question 260
+   moves none. **Open: regeneration of the committed SBOMs** after the other rounds (the lead's, as above;
+   `scripts/kit/regenerate_compliance.py --check` says whether they are stale), and a consumer of the
+   MoE-store selection (Known gaps).

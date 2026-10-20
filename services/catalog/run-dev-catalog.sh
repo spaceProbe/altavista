@@ -41,7 +41,8 @@
 #     server sibling does not `ensure_bucket` on a developer's behalf either.
 #
 # Usage: services/catalog/run-dev-catalog.sh
-# Stop it with the `docker rm -f <container id>` command this script prints at the end.
+# Stop it with the `docker rm -f -v <container id>` command this script prints at the end (`-v`: the
+# PostGIS image declares VOLUME /var/lib/postgresql/data, and `rm -f` alone leaves it behind, question 261).
 
 set -euo pipefail
 
@@ -165,5 +166,5 @@ echo "  No schema is applied by this script -- run av-catalog-migrate against th
 echo "  if you want the catalog tables (cargo build -p av-catalog --bin av-catalog-migrate,"
 echo "  then target/debug/av-catalog-migrate --catalog-host 127.0.0.1 --catalog-port $HOST_PORT"
 echo "  --catalog-user $POSTGRES_USER --catalog-password $POSTGRES_PASSWORD --catalog-database $POSTGRES_DB)."
-echo "  Stop it with: docker rm -f $CONTAINER_ID"
+echo "  Stop it with: docker rm -f -v $CONTAINER_ID"
 echo "  (labelled av.test=1 -- the next docker-gated test run on this host will also prune it)"

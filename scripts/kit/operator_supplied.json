@@ -5,13 +5,14 @@
     "clickhouse": {
       "arm64_manifest_digest": "sha256:b4e4a09d5c05a17640315aeb72aeab3fe03c96a937f414526a7c1ebda3201cb0",
       "digest": "sha256:6ded2b2c2f2c46f12784bd8000c75f8aa7363372ed64afccaa932456b8cb41e4",
-      "held": {
-        "question": 247,
-        "summary": "held pending licence review"
-      },
       "item": 4,
       "kind": "container-image",
       "licences": "LGPL (libgsasl, libssh, mariadb-connector-c, numactl, xz, lemmagen-c), GPL-2.0-or-BSD (ittapi), MPL-2.0; ClickHouse itself is Apache-2.0",
+      "optional": {
+        "enables": "the ClickHouse MoE (sweep study) store",
+        "otherwise": "the file store",
+        "question": 260
+      },
       "reference": "clickhouse/clickhouse-server@sha256:6ded2b2c2f2c46f12784bd8000c75f8aa7363372ed64afccaa932456b8cb41e4",
       "source_record": "services/clickhouse/IMAGE_DIGEST.md",
       "verification": {
@@ -19,7 +20,7 @@
         "step": "images"
       },
       "version": "26.8.29.10 LTS",
-      "why": "Static LGPL libraries in the server binary. Held out of the kit pending the user's licence review (question 247): the builder refuses to declare it, so the kit never needs it and the list reports it outside the kit"
+      "why": "Operator-supplied under question 260: the server binary statically links LGPL libraries and the kit redistributes no GPL or LGPL code (question 251), so the kit never carries the image or any part of it. Optional: when the operator has loaded exactly this digest onto the Docker host the image step verifies it by digest and enables the ClickHouse MoE store; when it is absent the MoE store is the file store and nothing fails; a kit built with --declare-operator-supplied clickhouse requires it like versitygw"
     },
     "debian-bookworm-slim-base-image": {
       "base_of": ["edge-plugin-image"],
