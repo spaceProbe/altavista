@@ -5652,7 +5652,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "f8ae0a1e6862604d3cc0c8d4e92259bc4f7eb8242b384a20c23c1f7959a323e6"
+          "content": "ce5d98248dd66b18eb08bc29c4fc4aef5dc1ac200840240eb3b576e437406c39"
         }
       ],
       "name": "edge-plugin-image",
@@ -5669,9 +5669,9 @@
       "type": "container",
       "version": "av-edge-plugin:local"
     },
-    "timestamp": "2026-10-19T15:17:40Z"
+    "timestamp": "2026-10-20T00:32:16Z"
   },
-  "serialNumber": "urn:uuid:f0840bf8-5a02-a618-c8ba-a35a61a8233e",
+  "serialNumber": "urn:uuid:574aaf08-320f-ec2e-994d-c3c75346a14f",
   "specVersion": "1.5",
   "version": 1
 }
