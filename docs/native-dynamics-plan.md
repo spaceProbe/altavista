@@ -2280,3 +2280,42 @@ round's `scratch/phase2-evidence/`.
 - A cross-compiled amd64 build would retire the emulated compile and its intermittent qemu-user
   faults. It is not built here, because the emulated build succeeded for the proof.
 - The SBOMs that move with the lockfile are the lead's to regenerate.
+
+### Gates (manager, no worker active, at `5f51413`, every cargo command through `scripts/dev/cargo-slot`)
+
+The gate ran after the second develop merge (`e22fafe`, which carries `f85a03e`). Whole outputs are
+in the round's `gate/` folder. A first attempt at `7e1a418` is kept in `gate/first-attempt-7e1a418/`:
+it found the HIL stand-in's moved hash (above), and it was stopped before pytest when develop moved.
+
+| Phase | Result |
+|---|---|
+| `buf breaking proto --against /Users/probe/code/AltaVista/proto`, `buf lint proto` | exit 0, exit 0 |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | 1944 passed, **1 failed**, 4 ignored: `k8s_container_and_native_studies_are_byte_identical_…`, the new assertion against the stale `av-sweep-sample:local` (by design, ruling 6; its message names the stale image) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | exit 0, 0 warnings, with the guard in force |
+| clippy `--no-default-features` for `av-kernel`, `av-run`, `av-sweep` | exit 0 ×3 |
+| required-features lint, 5 groups (`av-cdm full`, `av-kernel gmat`, `av-run gmat`, `av-sweep gmat`, `av-jobs store-fixture`) | 5 of 5 exit 0 |
+| `cargo deny check` | advisories ok, bans ok, licenses ok, sources ok |
+| `cargo test -p av-orbital --no-default-features` | 142 passed, 0 failed |
+| `cargo build -p av-edge-board --bins` | exit 0 |
+| `cargo test -p av-kernel --no-default-features` | 769 passed, 0 failed |
+| `cargo test -p av-kernel` | 1032 passed, 0 failed, 1 ignored |
+| Renode (`AV_RENODE_TESTS=1`, `drm_attitude_control_renode`) | 1 passed: records-only `0532f8ff…` both sides, 297.8 s |
+| HIL stand-in (`AV_HIL_STANDIN_TESTS=1`) | 1 passed, against the re-pinned reference |
+| standalone `web/js/**/*_check.mjs` | 29 of 29 standalone checks exit 0. The other 4 of the 33 files take arguments (`command_panel`, `panels`, `timeline`, `layers_stream`), as in earlier gates |
+| real-Chrome viewer tests | 40 passed |
+| `pytest -q -rs` under `--hold` | 1728 passed, **9 failed**, 25 skipped. All nine are the lead's at the merge (below) |
+
+The nine pytest failures, attributed:
+- **Seven SBOM-epoch tests:** `test_the_epoch_is_never_wall_clock` for six components and
+  `test_all_six_rust_components_share_exactly_one_epoch_from_git`. The committed SBOMs carry
+  `2026-10-20T00:21:22Z`, and git's committer date for the Rust epoch paths is now this round's.
+  Regenerating compliance is the lead's.
+- **Two stale images:**
+  - `services/edge-plugin/IMAGE_DIGEST.md` (`test_edge_plugin_container.py`);
+  - `services/cfs/IMAGE_DIGEST.md` (`test_image_digest.py`).
+  Both record `24857557`, and this round's commits touch their copied paths (`crates/av-dynamics`,
+  `crates/av-cdm`'s dependents). Both are rebuilt by the lead at the merge, with
+  `av-sweep-sample:local`.
+
+`target/debug/deps` held 86,975 entries at the start and 133,790 at the end. It was moved aside at
+the round's end, with no cargo running in the tree, to `target/debug/deps.aside-libm-end`.
