@@ -1,7 +1,7 @@
 # Roadmap status
 
 As of 2026-10-19, against the phase table in `architecture.md`. Decisions are numbered in
-`open-questions.md` (1–262); each track's plan records its rounds and its `## Delivered` section.
+`open-questions.md` (1–263); each track's plan records its rounds and its `## Delivered` section.
 
 ## By phase
 
@@ -35,7 +35,7 @@ recipe is in `README.md`.
 
 ## Next, in the order the lead would take it
 
-1. ClickHouse as an operator-supplied component (question 260, heavy round next).
+1. (Done, question 263: ClickHouse is an optional operator-supplied component.) The open items of questions 261 and 263 (the remaining release-then-reuse port helpers, a consumer of the MoE-store selection, the object store as an application layer), as rounds the user charters.
 2. The open heavy and native items above, as one round per team when the user charters them.
 3. (Done, question 262: native runs are byte-identical across macOS arm64, Linux aarch64 and Linux x86_64.)
 4. Hardware in the loop, when the user resumes it.
