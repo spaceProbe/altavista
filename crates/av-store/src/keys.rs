@@ -2,9 +2,9 @@
 //!
 //! Splitting the first two hex-digit pairs into their own path segments (the same "shard by
 //! the first few hex characters of the hash" layout S3-compatible object stores and most
-//! content-addressed caches use) keeps any one MinIO "directory" -- really a common key
+//! content-addressed caches use) keeps any one S3 "directory" -- really a common key
 //! prefix, since S3 has no real directories -- from accumulating every object the store ever
-//! holds under one flat prefix, which is a known MinIO/S3 listing-performance trap once an
+//! holds under one flat prefix, which is a known S3 listing-performance trap once an
 //! object count reaches into the millions. `prefix` itself is deployment-chosen (e.g.
 //! `"imagery/2026"`, `crate::client::StoreConfig::key_prefix`) so more than one logical
 //! collection can share one bucket without their keys colliding.

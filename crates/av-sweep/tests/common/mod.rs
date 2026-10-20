@@ -1,7 +1,7 @@
 //! The real-container fixture shared by `tests/clickhouse_store.rs` and
 //! `tests/clickhouse_real_sweep.rs`: one labelled, loopback-only ClickHouse container from the
 //! image `services/clickhouse/IMAGE_DIGEST.md` records, with the same gate / lock / label / prune
-//! discipline as `crates/av-store/tests/minio_store.rs` (the template this follows):
+//! discipline as `crates/av-store/tests/s3_store.rs` (the template this follows):
 //!
 //! 1. [`gate`] compares the image already present locally with the recorded digest
 //!    (`av_lockstep::docker::recorded_digest_gate`, which only ever runs `docker image inspect`);

@@ -2,7 +2,7 @@
 # services/catalog/run-dev-catalog.sh -- H2 (docs/heavy-plan.md): starts the SAME PostGIS
 # image, by the SAME digest, that crates/av-catalog/tests/catalog_postgis.rs runs its own tests
 # against, for a developer to poke at by hand (psql, a GUI client, PostGIS's own tooling). The
-# SAME developer convenience services/store/run-dev-store.sh already is for MinIO -- this
+# SAME developer convenience services/store/run-dev-store.sh already is for the S3 server -- this
 # script mirrors that one's structure, comments and lock discipline line for line, adjusted
 # only for PostgreSQL's own port/env-var/readiness shape.
 #
@@ -37,8 +37,8 @@
 #     `target/debug/av-catalog-migrate --catalog-host 127.0.0.1 --catalog-port <the port this
 #     script printed> --catalog-user postgres --catalog-password <printed> --catalog-database
 #     <printed>` -- idempotent, prints what it applied). `scripts/heavy/README.md` step 0.5b is
-#     the copy-pasteable version of that command. This mirrors the same way this script's MinIO
-#     sibling does not `ensure_bucket` on a developer's behalf either.
+#     the copy-pasteable version of that command. This mirrors the same way this script's S3
+#     server sibling does not `ensure_bucket` on a developer's behalf either.
 #
 # Usage: services/catalog/run-dev-catalog.sh
 # Stop it with the `docker rm -f <container id>` command this script prints at the end.
@@ -69,7 +69,8 @@ fi
 # Extracts the trimmed contents of the first fenced (```) code block that appears AFTER the
 # first line containing $1 -- the same two-block shape
 # crates/av-catalog/tests/catalog_postgis.rs's own `fenced_block_after` parses (itself mirroring
-# crates/av-store/tests/minio_store.rs's identically-named function), reimplemented here in awk
+# crates/av-store/tests/s3_store.rs's identically-named function as it was when this script was
+# written), reimplemented here in awk
 # (this script has no Rust toolchain dependency, deliberately) rather than shelling out to the
 # test binary itself.
 fenced_block_after() {

@@ -8,7 +8,7 @@
 //!   own hash where [`crate::client::StoreClient::head`] can rebuild an `AssetRef` from it
 //!   with no other input.
 //! - `x-amz-meta-av-marking` -- `Label.marking`, plain ASCII, specifically so a human running
-//!   `mc stat` (MinIO's CLI) against the object sees the handling marking directly in the
+//!   `mc stat` (an S3 CLI; MinIO's `mc`) against the object sees the handling marking directly in the
 //!   metadata listing, without having to base64-decode and `prost`-decode
 //!   `x-amz-meta-av-label` first.
 //! - `x-amz-meta-av-label` -- standard-alphabet, padded base64 of the `prost`-encoded

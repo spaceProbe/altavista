@@ -26,10 +26,11 @@
 //! `env!("CARGO_MANIFEST_DIR")` (this task's rule 9) rather than hard-coding either the image
 //! reference or its digest a second time in this file's own source -- the recorded digest has
 //! exactly one home. This whole section, and [`gate`]/[`fenced_block_after`] themselves, mirror
-//! `crates/av-store/tests/minio_store.rs`'s identically-named functions line for line -- the
-//! established pattern this task's own brief says to mirror exactly.
+//! `crates/av-store/tests/s3_store.rs`'s identically-named functions as they were when this file
+//! was written (that file now reads its record through `av_lockstep::docker`) -- the established
+//! pattern this task's own brief says to mirror exactly.
 //!
-//! # Gate/skip/label/lock discipline -- mirrored from `crates/av-store/tests/minio_store.rs`
+//! # Gate/skip/label/lock discipline -- mirrored from `crates/av-store/tests/s3_store.rs`
 //!
 //! Every `#[tokio::test]` below: calls [`gate`] first (a gate failure announces a visible,
 //! named `SKIPPED` line via [`av_lockstep::docker::announce_gate_skip`] and returns -- never a
@@ -57,10 +58,10 @@ use av_lockstep::docker::{announce_gate_skip, lock_docker_tests, prune_stale_tes
 use openssl::sha::sha256;
 
 const CONTAINER_PORT: u16 = 5432;
-// 60s, not `crates/av-store/tests/minio_store.rs`'s own 30s: a PostgreSQL/PostGIS container's
+// 60s, not `crates/av-store/tests/s3_store.rs`'s own 30s: a PostgreSQL/PostGIS container's
 // own startup (initdb, then this image's own postgis-extension init scripts --
 // `services/catalog/IMAGE_DIGEST.md`'s own measured fact) is genuinely heavier than a
-// stateless MinIO server's, and this host runs under real, documented memory pressure
+// stateless S3 server's, and this host runs under real, documented memory pressure
 // (`common.md`: "This machine is SHARED with other concurrent sessions and is under real
 // memory pressure") -- measured directly: a 30s budget produced a real, reproducible
 // `wait_for_ready` timeout under load in this task's own acceptance run (the container itself
@@ -77,13 +78,14 @@ const READY_TIMEOUT: Duration = Duration::from_secs(60);
 /// `CatalogAsset::created_tai_ns`) -- this crate never reads a clock itself (rule 7), and this
 /// file's own tests need no relationship to the real wall clock at all, only internal
 /// consistency, so a fixed constant is simpler and more deterministic (ADR-004) than reading
-/// `SystemTime::now()` the way `crates/av-store/tests/minio_store.rs`'s own `now()` must
+/// `SystemTime::now()` the way `crates/av-store/tests/s3_store.rs`'s own `now()` must
 /// (that file's SigV4 signing genuinely needs a real-ish timestamp; nothing here does).
 const TEST_EPOCH_TAI_NS: i64 = 1_700_000_000_000_000_000;
 
 // -----------------------------------------------------------------------------------------
 // services/catalog/IMAGE_DIGEST.md parsing -- the recorded digest's one home. Mirrors
-// crates/av-store/tests/minio_store.rs's identically-named functions.
+// crates/av-store/tests/s3_store.rs's identically-named functions (as they were when this file was
+// written; that file now reads its record through `av_lockstep::docker`).
 // -----------------------------------------------------------------------------------------
 
 fn image_digest_md_path() -> PathBuf {
@@ -189,9 +191,9 @@ async fn start_fixture(image_ref: &str, test_name: &str) -> (PostgisFixture, PgC
     let run_id = test_run_id();
     let labels = labels_from_test_label_args(&run_id);
 
-    // Postgres database-name rules are stricter than MinIO's access-key rules (letters/digits/
+    // Postgres database-name rules are stricter than an S3 server's access-key rules (letters/digits/
     // underscore, must not start with a digit) -- `test_run_id()`'s own "<pid>-<nanos>" shape
-    // has a leading digit and a hyphen, so this file (unlike minio_store.rs's own
+    // has a leading digit and a hyphen, so this file (unlike s3_store.rs's own
     // `sanitized_run_id`, which just strips the hyphen) also prefixes with a letter, matching
     // `services/catalog/run-dev-catalog.sh`'s own identical `avtest<sanitized>` shape.
     let sanitized_run_id: String = run_id.chars().filter(char::is_ascii_alphanumeric).collect();

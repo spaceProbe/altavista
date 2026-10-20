@@ -6,7 +6,7 @@ asserts no frame exceeds the budget and the memory budget is never crossed."
 # What this stands up, for real
 
 Every piece of infrastructure this file needs -- the digest gate, the host-wide-locked
-labelled MinIO container, the `cargo build`s, `av-tile-fixture`, the `LocalTestIssuer`
+labelled S3-store container, the `cargo build`s, `av-tile-fixture`, the `LocalTestIssuer`
 and its token, and the real `av-tiles` subprocess -- comes from `tests/heavy_stack.py`
 (deliverable 4's own extraction out of `tests/test_viewer_tiles_route.py`, see that
 module's own docstring for the full reasoning; not repeated here). This file adds
@@ -28,7 +28,7 @@ network time is deliberately NOT inside it) is run as a real `node` subprocess a
 that server's own real origin, with the real tile set's real manifest hash. Every tile
 byte this test's own assertions depend on crossed a real loopback socket, through the
 real FastAPI proxy route (`altavista/server.py`'s `tiles_tile`), to the real `av-tiles`
-gateway, to the real MinIO object store `av-tile-fixture` populated.
+gateway, to the real S3 object store `av-tile-fixture` populated.
 
 # The frame budget: FRAME_BUDGET_MS, and why
 
@@ -42,7 +42,7 @@ file's own module docstring). Measured directly, twice:
     across several runs stayed under 2ms, with `p95FrameMs` under 0.03ms -- the one
     outlier was the very first frame (a few hundred microseconds to ~1ms), consistent
     with V8/Node module and `node:crypto` first-call warm-up, not per-tile cost.
-  - Against THIS test's own real stack (real MinIO, real av-tiles, real viewer server,
+  - Against THIS test's own real stack (real S3 store, real av-tiles, real viewer server,
     real loopback `fetch`, real cargo-built binaries, on this exact host): four
     consecutive full runs measured `maxFrameMs` of 1.79ms, 1.86ms, 1.86ms and 1.81ms
     (`p95FrameMs` under 0.021ms every time -- the max is a single-frame outlier, the
@@ -57,7 +57,7 @@ itself more than a dozen dropped frames at 60Hz, so a 130x margin was proving no
 about frame timing, only that the harness ran at all. Corrective round 3 tightened it
 to FRAME_BUDGET_MS = 16.7 -- one frame at 60Hz, the number H5's claim is actually
 about -- and re-measured five CONSECUTIVE full runs against this exact real stack
-(same real MinIO, real av-tiles, real viewer server, real loopback `fetch`, on this
+(same real S3 store, real av-tiles, real viewer server, real loopback `fetch`, on this
 exact host) to confirm the new budget holds under real, current host load rather than
 assuming the four historical numbers above still apply:
 
@@ -182,15 +182,15 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from heavy_stack import (  # noqa: F401 -- rust_bins/minio/issuer/minio_bucket/tile_set_label/key_prefix are transitive fixture deps
+from heavy_stack import (  # noqa: F401 -- rust_bins/s3_store/issuer/store_bucket/tile_set_label/key_prefix are transitive fixture deps
     LADDER,
-    MINIO_REGION,
+    STORE_REGION,
     SKIP_REASON,
     av_tiles_service,
     issuer,
     key_prefix,
-    minio,
-    minio_bucket,
+    s3_store,
+    store_bucket,
     rust_bins,
     tile_set,
     tile_set_label,
@@ -348,7 +348,7 @@ READY_TIMEOUT_S = 60.0
 
 # Round 6 (docs/open-questions.md question 231's ruling, "replace or composite"): a
 # SECOND real tile set, built the SAME way `tests/heavy_stack.py`'s own `tile_set`
-# fixture builds the first (same `av-tile-fixture` binary, same `minio`, same
+# fixture builds the first (same `av-tile-fixture` binary, same `s3_store`, same
 # `key_prefix`/`tile_set_label` -- av-tiles' own `--key-prefix` flag scopes where it
 # looks for objects in the bucket, so a second tile set must share it with whatever
 # `av_tiles_service` was actually started with; only the JOB ID and the PYRAMID DEPTH
@@ -362,7 +362,7 @@ GLOBE_PROBE_TILE_SET_B_MAX_LEVEL = 1
 
 
 @pytest.fixture(scope="module")
-def tile_set_b(rust_bins, minio, key_prefix, tile_set_label):
+def tile_set_b(rust_bins, s3_store, key_prefix, tile_set_label):
     cmd = [
         str(rust_bins.tile_fixture),
         "--key-prefix", key_prefix,
@@ -373,11 +373,11 @@ def tile_set_b(rust_bins, minio, key_prefix, tile_set_label):
         "--max-level", str(GLOBE_PROBE_TILE_SET_B_MAX_LEVEL),
         "--tile-size", "16",
         "--synthetic-source", "32x16",
-        "--store-endpoint", f"http://127.0.0.1:{minio.host_port}",
-        "--store-region", MINIO_REGION,
-        "--store-access-key-id", minio.access_key,
-        "--store-secret-access-key", minio.secret_key,
-        "--store-bucket", minio.bucket,
+        "--store-endpoint", f"http://127.0.0.1:{s3_store.host_port}",
+        "--store-region", STORE_REGION,
+        "--store-access-key-id", s3_store.access_key,
+        "--store-secret-access-key", s3_store.secret_key,
+        "--store-bucket", s3_store.bucket,
         "--store-path-style",
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)

@@ -24,7 +24,7 @@ It imports the standard library and `manifest` only, so it ships inside every ki
 |---|---|
 | `container-base-image` | an image listed in the pin's `base_of` is carried (`images.<c>.collected`) |
 | `data-tree` (GMAT) | `packs.<pin.pack>` is present |
-| `container-image` (MinIO, PostGIS, ClickHouse) | the pin's id is in `operator_supplied_declared`, which `build_kit.py --declare-operator-supplied NAME` fills (default: empty) |
+| `container-image` (Versity Gateway, PostGIS, ClickHouse) | the pin's id is in `operator_supplied_declared`, which `build_kit.py --declare-operator-supplied NAME` fills (default: empty) |
 | `python-wheel` | an entry of `wheels.operator_supplied` names the pin's id as its `component`: the wheel step found a bundled GPL-family library in that wheel (`wheel_libs.py`) and did not carry the wheel |
 
 A service image that is not declared is outside the kit and is listed as such, not verified. A pin

@@ -1,21 +1,21 @@
-//! Task 3c (`docs/heavy-plan.md` H3's exit criterion): the real MinIO proof that a tiler
-//! job's tile set actually round-trips through a real `av-store`/MinIO object store, under a
-//! manifest whose SHA-256 is the tile set's own identity -- not merely through
-//! `crate::runner::MemoryObjectSink`, the in-memory test double `tests/tiler.rs` (P1f) uses.
+//! Task 3c (`docs/heavy-plan.md` H3's exit criterion): the real S3-server proof that a tiler
+//! job's tile set actually round-trips through a real `av-store` object store (the S3 server
+//! `services/store/IMAGE_DIGEST.md` records, question 256), under a manifest whose SHA-256 is the
+//! tile set's own identity -- not merely through `crate::runner::MemoryObjectSink`, the in-memory
+//! test double `tests/tiler.rs` (P1f) uses.
 //!
 //! # Template -- mirrored exactly, never a second way of doing any of this
 //!
-//! `crates/av-store/tests/minio_store.rs` is this file's own template (this task's own
+//! `crates/av-store/tests/s3_store.rs` is this file's own template (this task's own
 //! brief: "Copy its gating, its lock discipline, its labelling, its prune-before-create, its
-//! skip-line wording and its container lifecycle exactly"). The `services/store/
-//! IMAGE_DIGEST.md` parsing (`image_digest_md_path`/`fenced_block_after`/
-//! `parse_image_digest_md`/`gate`/`gate_or_skip!`), the container-readiness probe
-//! (`probe_health_once`/`wait_for_health`), the label conversion
+//! skip-line wording and its container lifecycle exactly"). The record loading
+//! (`image_digest_md_path`/`load_launch`/`gate_or_skip!`, over
+//! `av_lockstep::docker::parse_recorded_launch`), the container-readiness probe
+//! (`probe_health_once`/`wait_for_health`, against the record's health path), the label conversion
 //! (`labels_from_test_label_args`) and the `docker(...)` helper below are that file's own
-//! functions, copied character for character (the doc comments trimmed to what this file
-//! adds, not repeated) rather than reimplemented a second, independently-drifting way -- see
-//! that file's own doc comment for the full reasoning behind each ("never pulls", "gate/
-//! skip/lock discipline", "bucket/prefix/credentials").
+//! functions, copied rather than reimplemented a second, independently-drifting way -- see that
+//! file's own doc comment for the full reasoning behind each ("record-driven and
+//! server-agnostic", "never pulls", "gate/skip/lock discipline", "bucket/prefix/credentials").
 //!
 //! # The fixture -- re-declared, not factored into `tests/common/`
 //!
@@ -43,7 +43,7 @@
 //! `TileEntry.uri` as `format!("memory://{key}")` unconditionally -- it runs before the
 //! `ObjectSink` and has no way to know, and did not ask, what scheme the configured sink
 //! would use. So every tile in this test's manifest claimed `"memory://tiles/.../<hash>"`
-//! while the object genuinely lived in this test's real MinIO container at
+//! while the object genuinely lived in this test's real S3-server container at
 //! `"s3://<bucket>/tiles/.../<hash>"`. A consumer could not have used the manifest to find a
 //! tile in any store-backed deployment.
 //!
@@ -78,13 +78,12 @@ use av_jobs::runner::{content_addressed_key, ObjectSink, ObjectSource, Runner};
 use av_jobs::tiler::TilerExecutor;
 use av_label::ClearanceLadder;
 use av_lockstep::docker::{
-    announce_gate_skip, lock_docker_tests, prune_stale_test_resources, recorded_digest_gate, test_label_args, test_run_id, DockerGateReason, ManagedContainer,
+    announce_gate_skip, lock_docker_tests, parse_recorded_launch, prune_stale_test_resources, recorded_digest_gate, test_label_args, test_run_id, ManagedContainer, RecordedLaunch,
 };
 use av_store::{StoreClient, StoreConfig};
 use bytes::Bytes;
 use openssl::sha::sha256;
 
-const CONTAINER_PORT: u16 = 9000;
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const REGION: &str = "us-east-1";
 const BUCKET: &str = "av-jobs-store-tiler-test";
@@ -96,7 +95,7 @@ const RASTER_MEDIA_TYPE: &str = "application/vnd.altavista.raster+raw";
 /// identical fixture/params/`KEY_PREFIX`/job id.
 ///
 /// **This equality across two completely different storage backends is the point**, not an
-/// incidental detail: the in-memory run and this real-MinIO run must produce the SAME tile
+/// incidental detail: the in-memory run and this real-S3-server run must produce the SAME tile
 /// set identity, because a tile set copied between stores is the same tile set. That holds
 /// by construction now, not by accident -- `TileEntry.uri` is empty and `object_key` carries
 /// only the backend-independent `<prefix>/<hh>/<hh>/<sha256>` layout (`crate::tiler`'s own
@@ -109,60 +108,42 @@ const PINNED_MANIFEST_SHA256: &str = "7c23f4f0b6a81270c196df8acf8d6c17c86d69185b
 const PINNED_JOB_ID: &str = "job-pin";
 
 // -----------------------------------------------------------------------------------------
-// services/store/IMAGE_DIGEST.md parsing -- copied from crates/av-store/tests/minio_store.rs
-// verbatim (this file's own module doc, "Template"). The recorded digest has exactly one
-// home; this function derives its path from CARGO_MANIFEST_DIR (av-jobs's own manifest dir,
-// crates/av-jobs, the same depth as av-store's) rather than baking in an absolute path.
+// services/store/IMAGE_DIGEST.md -- the recorded image and launch record, read through
+// av_lockstep::docker::parse_recorded_launch exactly as crates/av-store/tests/s3_store.rs does.
+// The path derives from CARGO_MANIFEST_DIR (av-jobs's own manifest dir, crates/av-jobs, the same
+// depth as av-store's) rather than baking in an absolute path.
 // -----------------------------------------------------------------------------------------
 
 fn image_digest_md_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../services/store/IMAGE_DIGEST.md")
 }
 
-fn fenced_block_after(text: &str, marker: &str) -> Option<String> {
-    let lines: Vec<&str> = text.lines().collect();
-    let marker_idx = lines.iter().position(|l| l.contains(marker))?;
-    let fence_start = marker_idx + lines[marker_idx..].iter().position(|l| l.trim() == "```")?;
-    let fence_end = fence_start + 1 + lines[fence_start + 1..].iter().position(|l| l.trim() == "```")?;
-    let content = lines[fence_start + 1..fence_end].join("\n").trim().to_string();
-    if content.is_empty() {
-        None
-    } else {
-        Some(content)
-    }
-}
-
-fn parse_image_digest_md() -> (String, String) {
+fn load_launch() -> RecordedLaunch {
     let path = image_digest_md_path();
     let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("could not read {path:?}: {e}"));
-    let image_ref = fenced_block_after(&text, "Registry reference").unwrap_or_else(|| panic!("could not find the 'Registry reference' fenced code block in {path:?}"));
-    let recorded_id = fenced_block_after(&text, "docker image inspect").unwrap_or_else(|| panic!("could not find the 'docker image inspect' fenced code block in {path:?}"));
-    (image_ref, recorded_id)
+    parse_recorded_launch(&text).unwrap_or_else(|e| panic!("{path:?}: {e}"))
 }
 
-/// The module-level gate (question 212(a)): docker daemon up AND the local image's id matches
-/// what `services/store/IMAGE_DIGEST.md` recorded -- identical check to
-/// `crates/av-store/tests/minio_store.rs::gate`, against the same recorded file.
-fn gate() -> Result<(), DockerGateReason> {
-    let (image_ref, recorded_id) = parse_image_digest_md();
-    recorded_digest_gate(&image_ref, &recorded_id)
-}
-
-/// This test's own first line: on a gate failure, announce the visible skip (never a silent
-/// pass -- question 194) and return from the calling test function.
+/// This test's own first line (question 212(a)): load the record, then require the docker daemon
+/// up AND the local image's id equal to the recorded one -- the identical check to
+/// `crates/av-store/tests/s3_store.rs::gate_or_skip`. On a gate failure, announce the visible skip
+/// (never a silent pass -- question 194) and return from the calling test function; otherwise
+/// evaluates to the [`RecordedLaunch`].
 macro_rules! gate_or_skip {
-    ($test_name:expr) => {
-        if let Err(reason) = gate() {
+    ($test_name:expr) => {{
+        let launch = load_launch();
+        if let Err(reason) = recorded_digest_gate(&launch.image_ref, &launch.recorded_id) {
             let line = announce_gate_skip($test_name, &reason);
             assert!(line.starts_with("SKIPPED "), "{line:?}");
             return;
         }
-    };
+        launch
+    }};
 }
 
 // -----------------------------------------------------------------------------------------
-// Fixture: one MinIO container + one StoreClient pointed at it -- mirrors
-// crates/av-store/tests/minio_store.rs's own MinioFixture/start_fixture.
+// Fixture: one S3-server container + one StoreClient pointed at it -- mirrors
+// crates/av-store/tests/s3_store.rs's own S3Fixture/start_fixture.
 // -----------------------------------------------------------------------------------------
 
 fn now() -> i64 {
@@ -177,10 +158,10 @@ fn docker(args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn probe_health_once(host_port: u16) -> Result<(), String> {
+fn probe_health_once(host_port: u16, health_path: &str) -> Result<(), String> {
     let mut stream = std::net::TcpStream::connect(("127.0.0.1", host_port)).map_err(|e| format!("connect: {e}"))?;
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
-    let request = format!("GET /minio/health/live HTTP/1.1\r\nHost: 127.0.0.1:{host_port}\r\nConnection: close\r\n\r\n");
+    let request = format!("GET {health_path} HTTP/1.1\r\nHost: 127.0.0.1:{host_port}\r\nConnection: close\r\n\r\n");
     stream.write_all(request.as_bytes()).map_err(|e| format!("write: {e}"))?;
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).map_err(|e| format!("read: {e}"))?;
@@ -193,17 +174,17 @@ fn probe_health_once(host_port: u16) -> Result<(), String> {
     }
 }
 
-fn wait_for_health(host_port: u16, container_id: &str, test_name: &str) {
+fn wait_for_health(host_port: u16, health_path: &str, container_id: &str, test_name: &str) {
     let deadline = Instant::now() + READY_TIMEOUT;
     let mut last_err;
     loop {
-        match probe_health_once(host_port) {
+        match probe_health_once(host_port, health_path) {
             Ok(()) => return,
             Err(e) => last_err = e,
         }
         if Instant::now() > deadline {
             let logs = docker(&["logs", container_id]);
-            panic!("{test_name}: MinIO at 127.0.0.1:{host_port} (container {container_id}) did not answer GET /minio/health/live with 200 within {READY_TIMEOUT:?}; last error: {last_err}; docker logs:\n{logs}");
+            panic!("{test_name}: the S3 server at 127.0.0.1:{host_port} (container {container_id}) did not answer GET {health_path} with 200 within {READY_TIMEOUT:?}; last error: {last_err}; docker logs:\n{logs}");
         }
         std::thread::sleep(Duration::from_millis(150));
     }
@@ -219,29 +200,28 @@ fn labels_from_test_label_args(run_id: &str) -> BTreeMap<String, String> {
     map
 }
 
-/// Starts a fresh, labelled, loopback-only MinIO container (via [`ManagedContainer::
-/// run_local`] -- no `docker pull`, question 154), waits for it to answer its health check,
-/// and builds a [`StoreClient`] against it with a freshly `ensure_bucket`d bucket. Mirrors
-/// `crates/av-store/tests/minio_store.rs::start_fixture`, minus the fields that test file
-/// needs and this one does not (`access_key`/`secret_key`/`endpoint` -- this file never
-/// builds a second, raw-signed request the way `minio_store.rs`'s own corruption test does).
-fn start_store_fixture(image_ref: &str, test_name: &str) -> (ManagedContainer, String, StoreClient) {
+/// Starts a fresh, labelled, loopback-only container from the record (via [`ManagedContainer::
+/// run_local`] -- no `docker pull`, question 154) with per-run generated credentials substituted
+/// into the record's credential environment, waits for its health path to answer 200, and builds a
+/// [`StoreClient`] against it. Mirrors `crates/av-store/tests/s3_store.rs::start_fixture`, minus
+/// the fields that test file needs and this one does not (`access_key`/`secret_key`/`endpoint` --
+/// this file never builds a second, raw-signed request the way `s3_store.rs`'s own corruption
+/// test does).
+fn start_store_fixture(launch: &RecordedLaunch, test_name: &str) -> (ManagedContainer, String, StoreClient) {
     let run_id = test_run_id();
     let labels = labels_from_test_label_args(&run_id);
 
     let sanitized_run_id: String = run_id.chars().filter(char::is_ascii_alphanumeric).collect();
     let access_key = format!("avjobstest{sanitized_run_id}");
     let secret_key = format!("avjobstestsecret{sanitized_run_id}");
+    let env = launch.render_credential_env(&access_key, &secret_key).unwrap_or_else(|e| panic!("{test_name}: rendering the recorded credential environment: {e}"));
 
-    let mut env = BTreeMap::new();
-    env.insert("MINIO_ROOT_USER".to_string(), access_key.clone());
-    env.insert("MINIO_ROOT_PASSWORD".to_string(), secret_key.clone());
-
-    let (container, host_port) = ManagedContainer::run_local(image_ref, &["server".to_string(), "/data".to_string()], CONTAINER_PORT, &BTreeMap::new(), &env, &BTreeMap::new(), &labels)
+    let image_ref = &launch.image_ref;
+    let (container, host_port) = ManagedContainer::run_local(image_ref, &launch.args, launch.container_port, &BTreeMap::new(), &env, &BTreeMap::new(), &labels)
         .unwrap_or_else(|e| panic!("{test_name}: ManagedContainer::run_local({image_ref:?}) failed: {e}"));
     let container_id = container.container_id.clone();
 
-    wait_for_health(host_port, &container_id, test_name);
+    wait_for_health(host_port, &launch.health_path, &container_id, test_name);
 
     let config = StoreConfig {
         endpoint: format!("http://127.0.0.1:{host_port}").parse().unwrap_or_else(|e| panic!("{test_name}: building the endpoint URI: {e}")),
@@ -432,18 +412,17 @@ fn content_addressed_key_matches_av_store_object_key_for_a_real_hash() {
 }
 
 // -----------------------------------------------------------------------------------------
-// The proof: a tiler job's tile set round-trips through a real MinIO, under a manifest whose
+// The proof: a tiler job's tile set round-trips through a real S3 server, under a manifest whose
 // hash is the tile set's identity.
 // -----------------------------------------------------------------------------------------
 
 #[test]
-fn tiler_job_round_trips_through_a_real_minio_store() {
-    const TEST_NAME: &str = "tiler_job_round_trips_through_a_real_minio_store";
-    gate_or_skip!(TEST_NAME);
-    let (image_ref, _recorded_id) = parse_image_digest_md();
+fn tiler_job_round_trips_through_a_real_s3_store() {
+    const TEST_NAME: &str = "tiler_job_round_trips_through_a_real_s3_store";
+    let launch = gate_or_skip!(TEST_NAME);
     let _lock = lock_docker_tests();
     prune_stale_test_resources(&_lock);
-    let (_container, _container_id, client) = start_store_fixture(&image_ref, TEST_NAME);
+    let (_container, _container_id, client) = start_store_fixture(&launch, TEST_NAME);
 
     let runtime = tokio::runtime::Runtime::new().unwrap_or_else(|e| panic!("{TEST_NAME}: building the tokio Runtime: {e}"));
     runtime.block_on(client.ensure_bucket(now())).unwrap_or_else(|e| panic!("{TEST_NAME}: ensure_bucket: {e}"));
@@ -499,7 +478,7 @@ fn tiler_job_round_trips_through_a_real_minio_store() {
     // sha256 equals JobCompletion.manifest_sha256 -- recomputed here, not trusted from the
     // AssetRef alone. -------------------------------------------------------------------
     let manifest_bytes_sha256_hex = av_jobs::hash::hex_encode(&sha256(&manifest_bytes));
-    assert_eq!(manifest_bytes_sha256_hex, completion.manifest_sha256, "the manifest bytes actually fetched back from MinIO must hash to JobCompletion.manifest_sha256");
+    assert_eq!(manifest_bytes_sha256_hex, completion.manifest_sha256, "the manifest bytes actually fetched back from the S3 server must hash to JobCompletion.manifest_sha256");
 
     let manifest: pb::TileSetManifest = prost::Message::decode(manifest_bytes.as_slice()).unwrap_or_else(|e| panic!("{TEST_NAME}: decoding the fetched manifest bytes as TileSetManifest: {e}"));
     assert!(!manifest.tiles.is_empty(), "{TEST_NAME}: the fetched manifest names no tiles at all");
@@ -557,7 +536,7 @@ fn tiler_job_round_trips_through_a_real_minio_store() {
     // Container teardown (before the lock is released): `_container` was declared before
     // `_lock` is dropped below is impossible -- `_lock` was declared FIRST, so by Rust's own
     // LIFO drop order, `_container`'s Drop (ManagedContainer::stop_and_remove) runs before
-    // `_lock`'s, exactly as crates/av-store/tests/minio_store.rs's own tests 1/2/4/5 rely on.
+    // `_lock`'s, exactly as crates/av-store/tests/s3_store.rs's own tests 1/2/4/5 rely on.
 }
 
 #[derive(Debug, Clone)]

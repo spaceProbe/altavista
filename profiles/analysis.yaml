@@ -5,7 +5,7 @@
 #
 # Stated plainly up front: as of M7.2, every plane-specific cell architecture.md's table
 # names for Analysis is unbuilt in this repository. The replay/analytics substrate
-# (architecture.md section 6: Redpanda, ClickHouse, MinIO) and the replay engine itself are
+# (architecture.md section 6: Redpanda, ClickHouse, an S3-compatible object store) and the replay engine itself are
 # later P1/P2 scope, not built yet -- this file names the gaps rather than selecting
 # components that do not exist.
 id: analysis

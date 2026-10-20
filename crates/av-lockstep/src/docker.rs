@@ -207,7 +207,7 @@ pub fn image_gate_status(default_image_ref: &str, build_hint: &str) -> Result<()
 }
 
 // ------------------------------------------------------------------------------------------
-// Question 154 / 212(a) (H1b, the av-store MinIO integration proof): a test must never pull an
+// Question 154 / 212(a) (H1b, the av-store S3 integration proof): a test must never pull an
 // image at test time -- the manager pulls once at setup and records the digest beside the
 // image's run/build script (e.g. `services/store/IMAGE_DIGEST.md`). [`local_image_id`] and
 // [`recorded_digest_gate`] are the two additive pieces that let a gated test compare the LOCAL
@@ -245,6 +245,119 @@ pub fn recorded_digest_gate(image_ref: &str, recorded_id: &str) -> Result<(), Do
         }),
         Ok(actual_id) if actual_id != recorded_id => Err(DockerGateReason::ImageDigestMismatch { image_ref: image_ref.to_string(), recorded_id: recorded_id.to_string(), actual_id }),
         Ok(_) => Ok(()),
+    }
+}
+
+// ------------------------------------------------------------------------------------------
+// Question 256: the recorded launch. `services/store/IMAGE_DIGEST.md` records not only which image
+// to trust but how to start it (port, health path, credential environment, server arguments), so
+// a test starts whatever S3 server the record names without naming it in code. Everything here is
+// docker-free text parsing; the docker half is [`ManagedContainer::run_local`].
+// ------------------------------------------------------------------------------------------
+
+/// The trimmed contents of the first fenced (```` ``` ````) block that appears AFTER the first line
+/// containing `marker`. `None` if the marker or a following fence pair is missing, or the block is
+/// empty, so a caller gets a clear error naming the file rather than an empty value flowing on.
+pub fn fenced_block_after(text: &str, marker: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let marker_idx = lines.iter().position(|l| l.contains(marker))?;
+    let fence_start = marker_idx + lines[marker_idx..].iter().position(|l| l.trim() == "```")?;
+    let fence_end = fence_start + 1 + lines[fence_start + 1..].iter().position(|l| l.trim() == "```")?;
+    let content = lines[fence_start + 1..fence_end].join("\n").trim().to_string();
+    if content.is_empty() {
+        None
+    } else {
+        Some(content)
+    }
+}
+
+/// The two placeholders a recorded credential line may contain.
+const PLACEHOLDER_ACCESS_KEY: &str = "access_key";
+const PLACEHOLDER_SECRET_KEY: &str = "secret_key";
+
+/// How to start the recorded image, as `services/store/IMAGE_DIGEST.md` records it. Server-agnostic:
+/// nothing here knows which S3 server the image is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedLaunch {
+    /// The pull-by-digest registry reference (`Registry reference` block).
+    pub image_ref: String,
+    /// The local image id [`local_image_id`] is expected to report (`docker image inspect` block).
+    pub recorded_id: String,
+    /// The container port the S3 API listens on (`Container port` block).
+    pub container_port: u16,
+    /// The unauthenticated `GET` path that answers 200 once the server serves; starts with `/`.
+    pub health_path: String,
+    /// Credential environment templates, name to value, where a value may contain `{access_key}` and
+    /// `{secret_key}` and nothing else in braces (`Credential environment` block).
+    pub credential_env: BTreeMap<String, String>,
+    /// Server arguments, passed after the image reference, one per line (`Server arguments` block).
+    pub args: Vec<String>,
+}
+
+/// `template` with `{access_key}` and `{secret_key}` replaced. Any other `{...}` (or an unclosed
+/// `{`) is refused. Substituted values are never rescanned.
+fn substitute_credential_placeholders(template: &str, access_key: &str, secret_key: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else { return Err(format!("unclosed `{{` in {template:?}")) };
+        match &after[..close] {
+            PLACEHOLDER_ACCESS_KEY => out.push_str(access_key),
+            PLACEHOLDER_SECRET_KEY => out.push_str(secret_key),
+            other => return Err(format!("unknown placeholder `{{{other}}}` in {template:?} (only {{{PLACEHOLDER_ACCESS_KEY}}} and {{{PLACEHOLDER_SECRET_KEY}}} are allowed)")),
+        }
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// Parses the launch record out of `services/store/IMAGE_DIGEST.md`'s text. The error names the
+/// missing or malformed field.
+pub fn parse_recorded_launch(text: &str) -> Result<RecordedLaunch, String> {
+    let block = |marker: &str, field: &str| fenced_block_after(text, marker).ok_or_else(|| format!("launch record: no non-empty fenced block after the {field:?} marker (a line containing {marker:?})"));
+    let image_ref = block("Registry reference", "Registry reference")?;
+    let recorded_id = block("docker image inspect", "docker image inspect")?;
+
+    let port_text = block("Container port", "Container port")?;
+    let container_port: u16 = port_text.parse().map_err(|e| format!("launch record: Container port {port_text:?} is not a port number: {e}"))?;
+    if container_port == 0 {
+        return Err("launch record: Container port 0 is not a port".to_string());
+    }
+
+    let health_path = block("Health path", "Health path")?;
+    if !health_path.starts_with('/') || health_path.contains(char::is_whitespace) {
+        return Err(format!("launch record: Health path {health_path:?} must start with '/' and contain no whitespace"));
+    }
+
+    let mut credential_env = BTreeMap::new();
+    for line in block("Credential environment", "Credential environment")?.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let Some((name, value)) = line.split_once('=') else { return Err(format!("launch record: Credential environment line {line:?} has no '='")) };
+        if name.is_empty() || name.contains(char::is_whitespace) {
+            return Err(format!("launch record: Credential environment line {line:?} has an empty or whitespace-containing variable name"));
+        }
+        substitute_credential_placeholders(value, "", "").map_err(|e| format!("launch record: Credential environment variable {name}: {e}"))?;
+        if credential_env.insert(name.to_string(), value.to_string()).is_some() {
+            return Err(format!("launch record: Credential environment variable {name} is listed twice"));
+        }
+    }
+
+    let args: Vec<String> = block("Server arguments", "Server arguments")?.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
+
+    Ok(RecordedLaunch { image_ref, recorded_id, container_port, health_path, credential_env, args })
+}
+
+impl RecordedLaunch {
+    /// The credential environment for `access_key`/`secret_key`, ready for [`ManagedContainer::run_local`]'s
+    /// `env`. Refuses a template with an unknown placeholder (a record built by hand rather than by
+    /// [`parse_recorded_launch`] can still carry one).
+    pub fn render_credential_env(&self, access_key: &str, secret_key: &str) -> Result<BTreeMap<String, String>, String> {
+        self.credential_env
+            .iter()
+            .map(|(name, template)| substitute_credential_placeholders(template, access_key, secret_key).map(|v| (name.clone(), v)).map_err(|e| format!("credential environment variable {name}: {e}")))
+            .collect()
     }
 }
 
@@ -800,14 +913,17 @@ impl ManagedContainer {
             .ok_or_else(|| DockerError::PortParse { container_id: self.container_id.clone(), container_port, raw: raw.clone() })
     }
 
-    /// `docker stop` then `docker rm` -- idempotent (a second call, or `Drop` after an explicit
-    /// call already succeeded, is a no-op).
+    /// `docker stop` then `docker rm -v` -- idempotent (a second call, or `Drop` after an explicit
+    /// call already succeeded, is a no-op). `-v` removes the container's anonymous volumes with it:
+    /// an image that declares a `VOLUME` (the recorded S3 server image declares `/data`) would
+    /// otherwise leave one behind per container (question 249 found exactly this leak for
+    /// registries). Named volumes are never touched.
     pub fn stop_and_remove(&mut self) -> Result<(), DockerError> {
         if self.stopped {
             return Ok(());
         }
         run_docker(&["stop", &self.container_id]).map_err(|detail| DockerError::Stop { container_id: self.container_id.clone(), detail })?;
-        run_docker(&["rm", &self.container_id]).map_err(|detail| DockerError::Remove { container_id: self.container_id.clone(), detail })?;
+        run_docker(&["rm", "-v", &self.container_id]).map_err(|detail| DockerError::Remove { container_id: self.container_id.clone(), detail })?;
         self.stopped = true;
         Ok(())
     }
@@ -818,12 +934,12 @@ impl ManagedContainer {
     /// pull` -- `image_ref` is assumed already present locally (pulled once at setup, outside
     /// any test; a caller that wants that assumption checked first should call
     /// [`recorded_digest_gate`] before this function, as every test in
-    /// `crates/av-store/tests/minio_store.rs` does). Shares [`build_run_args`] and
+    /// `crates/av-store/tests/s3_store.rs` does). Shares [`build_run_args`] and
     /// [`Self::published_host_port`] with `pull_and_run` -- the argv-building, loopback
     /// publishing, and best-effort teardown-on-port-lookup-failure behaviour is exactly the
     /// same, just with the pull step removed; nothing here is a second, drifting copy of that
     /// logic. `image_ref` is the full reference this function runs directly (already combining
-    /// image and digest/tag, e.g. `"quay.io/minio/minio@sha256:..."` -- unlike `pull_and_run`,
+    /// image and digest/tag, e.g. `"registry.example/org/image@sha256:..."` -- unlike `pull_and_run`,
     /// which takes `image`/`image_digest` separately only so it can format the same combined
     /// reference for its own `docker pull` call). Seven parameters, one under clippy's
     /// `too_many_arguments` default threshold -- no `#[allow]` needed here (unlike
@@ -1260,5 +1376,145 @@ mod tests {
     fn test_label_args_shape() {
         let args = test_label_args("77-88");
         assert_eq!(args, vec!["--label".to_string(), "av.test=1".to_string(), "--label".to_string(), "av.test.run_id=77-88".to_string()]);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Question 256: the recorded launch parser. Docker-free, unconditional.
+    // ---------------------------------------------------------------------------------------
+
+    const GOOD_RECORD: &str = "# record\n\
+- Registry reference (pull by digest):\n```\nexample/s3server@sha256:aaaa\n```\n\
+- `docker image inspect --format '{{.Id}}'` on this host:\n```\nsha256:aaaa\n```\n\
+**Container port**\n```\n8333\n```\n\
+**Health path** (GET)\n```\n/healthz\n```\n\
+**Credential environment**\n```\nAWS_ACCESS_KEY_ID={access_key}\nAWS_SECRET_ACCESS_KEY={secret_key}\n```\n\
+**Server arguments**\n```\nmini\n-dir=/data\n-flag=false\n```\n";
+
+    /// `GOOD_RECORD` with the fenced block after `marker` replaced by `replacement` (the marker
+    /// line stays). Panics if the marker is absent so a typo cannot make a test vacuous.
+    fn record_with_block(marker: &str, replacement: &str) -> String {
+        let lines: Vec<&str> = GOOD_RECORD.lines().collect();
+        let m = lines.iter().position(|l| l.contains(marker)).expect("marker present in GOOD_RECORD");
+        let open = m + lines[m..].iter().position(|l| *l == "```").unwrap();
+        let close = open + 1 + lines[open + 1..].iter().position(|l| *l == "```").unwrap();
+        let mut out: Vec<String> = lines[..=open].iter().map(|s| s.to_string()).collect();
+        out.push(replacement.to_string());
+        out.extend(lines[close..].iter().map(|s| s.to_string()));
+        out.join("\n")
+    }
+
+    /// `GOOD_RECORD` with the whole marker line and its block removed.
+    fn record_without(marker: &str) -> String {
+        let lines: Vec<&str> = GOOD_RECORD.lines().collect();
+        let m = lines.iter().position(|l| l.contains(marker)).expect("marker present in GOOD_RECORD");
+        let open = m + lines[m..].iter().position(|l| *l == "```").unwrap();
+        let close = open + 1 + lines[open + 1..].iter().position(|l| *l == "```").unwrap();
+        lines[..m].iter().chain(lines[close + 1..].iter()).copied().collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn fenced_block_after_takes_the_first_block_after_the_first_marker_line() {
+        let text = "intro\nMARK one\nprose\n```\n  first  \n```\nMARK two\n```\nsecond\n```\n";
+        assert_eq!(fenced_block_after(text, "MARK").as_deref(), Some("first"));
+        assert_eq!(fenced_block_after(text, "MARK two").as_deref(), Some("second"));
+        assert_eq!(fenced_block_after(text, "absent"), None);
+        assert_eq!(fenced_block_after("MARK\n```\n\n```\n", "MARK"), None, "an empty block is None");
+        assert_eq!(fenced_block_after("MARK\n```\nunterminated\n", "MARK"), None);
+    }
+
+    #[test]
+    fn a_good_record_parses_into_every_field() {
+        let r = parse_recorded_launch(GOOD_RECORD).expect("good record parses");
+        assert_eq!(r.image_ref, "example/s3server@sha256:aaaa");
+        assert_eq!(r.recorded_id, "sha256:aaaa");
+        assert_eq!(r.container_port, 8333);
+        assert_eq!(r.health_path, "/healthz");
+        assert_eq!(r.args, vec!["mini".to_string(), "-dir=/data".to_string(), "-flag=false".to_string()]);
+        assert_eq!(r.credential_env.get("AWS_ACCESS_KEY_ID").map(String::as_str), Some("{access_key}"));
+        let env = r.render_credential_env("AK1", "SK/2=").expect("renders");
+        assert_eq!(env, BTreeMap::from([("AWS_ACCESS_KEY_ID".to_string(), "AK1".to_string()), ("AWS_SECRET_ACCESS_KEY".to_string(), "SK/2=".to_string())]));
+    }
+
+    #[test]
+    fn a_substituted_value_is_never_rescanned_for_placeholders() {
+        let r = parse_recorded_launch(GOOD_RECORD).unwrap();
+        let env = r.render_credential_env("{secret_key}", "{x}").expect("a value that looks like a placeholder is just a value");
+        assert_eq!(env["AWS_ACCESS_KEY_ID"], "{secret_key}");
+        assert_eq!(env["AWS_SECRET_ACCESS_KEY"], "{x}");
+    }
+
+    #[test]
+    fn each_missing_field_is_named_in_the_error() {
+        for (marker, field) in [
+            ("Registry reference", "Registry reference"),
+            ("docker image inspect", "docker image inspect"),
+            ("Container port", "Container port"),
+            ("Health path", "Health path"),
+            ("Credential environment", "Credential environment"),
+            ("Server arguments", "Server arguments"),
+        ] {
+            let err = parse_recorded_launch(&record_without(marker)).unwrap_err();
+            assert!(err.contains(&format!("{field:?}")), "missing {field}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_port_is_refused() {
+        for bad in ["not-a-port", "70000", "-1", "0", "80 80"] {
+            let err = parse_recorded_launch(&record_with_block("Container port", bad)).unwrap_err();
+            assert!(err.contains("Container port"), "{bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_health_path_must_start_with_a_slash() {
+        for bad in ["healthz", "http://x/healthz", "/a b"] {
+            let err = parse_recorded_launch(&record_with_block("Health path", bad)).unwrap_err();
+            assert!(err.contains("Health path"), "{bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_credential_line_without_an_equals_sign_is_refused() {
+        let err = parse_recorded_launch(&record_with_block("Credential environment", "AWS_ACCESS_KEY_ID {access_key}")).unwrap_err();
+        assert!(err.contains("Credential environment") && err.contains("no '='"), "{err}");
+        let err = parse_recorded_launch(&record_with_block("Credential environment", "=value")).unwrap_err();
+        assert!(err.contains("variable name"), "{err}");
+    }
+
+    #[test]
+    fn a_duplicate_credential_variable_is_refused() {
+        let err = parse_recorded_launch(&record_with_block("Credential environment", "A={access_key}\nA={secret_key}")).unwrap_err();
+        assert!(err.contains("listed twice"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_or_unclosed_placeholder_is_refused() {
+        let err = parse_recorded_launch(&record_with_block("Credential environment", "A={access_key}\nB={region}")).unwrap_err();
+        assert!(err.contains("unknown placeholder") && err.contains("{region}"), "{err}");
+        let err = parse_recorded_launch(&record_with_block("Credential environment", "A={access_key")).unwrap_err();
+        assert!(err.contains("unclosed"), "{err}");
+        // A hand-built record is checked again at render time.
+        let hand = RecordedLaunch {
+            image_ref: "i".into(),
+            recorded_id: "sha256:i".into(),
+            container_port: 1,
+            health_path: "/".into(),
+            credential_env: BTreeMap::from([("A".to_string(), "{nope}".to_string())]),
+            args: vec![],
+        };
+        assert!(hand.render_credential_env("a", "s").unwrap_err().contains("unknown placeholder"));
+    }
+
+    /// The committed record itself parses (path from `CARGO_MANIFEST_DIR`, as the tests that use it do).
+    #[test]
+    fn the_committed_image_digest_record_parses() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../services/store/IMAGE_DIGEST.md");
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("could not read {path:?}: {e}"));
+        let r = parse_recorded_launch(&text).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+        assert!(r.image_ref.contains("@sha256:"), "{r:?}");
+        assert!(r.recorded_id.starts_with("sha256:"), "{r:?}");
+        assert!(!r.args.is_empty());
+        r.render_credential_env("ak", "sk").expect("the committed credential templates render");
     }
 }

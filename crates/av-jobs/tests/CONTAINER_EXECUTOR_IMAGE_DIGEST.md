@@ -56,7 +56,7 @@ no-new-privileges --user 10001:10001 -v <scratch>/in:/av-job/in:ro -v <scratch>/
 alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 <command>` -- see
 that module's own doc comment for the full design. `JobSpec.container_image` is the bare,
 tag-free `"alpine"` (matching `av_lockstep::docker::ManagedContainer`'s own `image`/`image_digest`
-convention -- e.g. `services/store/IMAGE_DIGEST.md`'s `quay.io/minio/minio`) and
+convention -- e.g. `services/store/IMAGE_DIGEST.md`'s `versity/versitygw`) and
 `JobSpec.container_image_digest` is the recorded id above. Both the executor's
 `crate::container::digest_gate` and this file's own `gate()` (in `tests/container.rs`, mirroring
 `store_tiler.rs`'s identical helper) inspect `<image>@<digest>` -- the digest reference -- and

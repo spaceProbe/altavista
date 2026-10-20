@@ -4,7 +4,7 @@
 //! depend on `av-store` directly (unlike `av-jobs`, which cannot -- see this crate's own
 //! `Cargo.toml`), but the seam is worth keeping anyway, for a different, still real reason:
 //! this crate's own request pipeline (`crate::core::handle`) needs to run in tests with no
-//! MinIO container at all (P1's acceptance tests -- refused-tile, byte-equality,
+//! S3-server container at all (P1's acceptance tests -- refused-tile, byte-equality,
 //! manifest-hash-mismatch, and every auth case -- are all in-process, no docker gate), and a
 //! trait object is what lets [`InMemoryObjectSource`] stand in for a real store with zero
 //! network I/O.

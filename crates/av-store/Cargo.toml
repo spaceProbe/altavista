@@ -31,14 +31,14 @@ openssl = "0.10"
 # hyper-util/hyper-openssl combination byte for byte -- this crate is not a gRPC client (no
 # `tonic` dependency at all), so it drives `hyper_util::client::legacy::Client` directly
 # rather than through `tonic::transport::Endpoint::connect_with_connector`. "client"/"http1"
-# only (never "http2", which MinIO's S3 API does not need and which would only grow this
+# only (never "http2", which an S3 API server does not need and which would only grow this
 # crate's dependency tree for nothing this round uses).
 hyper = { version = "1", features = ["client", "http1"] }
 # "client-legacy" for the `hyper_util::client::legacy` module itself; "http1"/"tokio" for the
 # same reason as `hyper`'s own features above; "client" for `hyper_util::client::legacy::
 # connect::HttpConnector`, the plain-TCP half `hyper_openssl::client::legacy::HttpsConnector`
 # wraps (see src/client.rs's module doc for why one `HttpsConnector<HttpConnector>` serves
-# both the `http://` endpoint the next task's MinIO integration test needs and a real
+# both the `http://` endpoint the S3-server integration test (tests/s3_store.rs) needs and a real
 # `https://` deployment, with no separate code path for either).
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
 # The OpenSSL-backed connector (crates.io: sfackler/hyper-openssl) -- never `hyper-rustls`,
@@ -91,13 +91,13 @@ base64 = "0.22"
 # `rand`/`uuid` (this crate mints no id of its own -- an object's identity is its content hash),
 # `once_cell`/`lazy_static` (nothing here needs process-wide lazy state), `anyhow` (every error
 # is the one typed `StoreError`, src/error.rs), `tracing` (out of scope for this round; the
-# next task's MinIO integration test is where observability would first matter).
+# S3-server integration test (tests/s3_store.rs) is where observability would first matter).
 
 [dev-dependencies]
 # tests/claim_check_hot_path.rs asserts `cargo tree`'s own output, so it needs nothing beyond
 # the standard library -- no dev-only dependency exists for that test.
 #
-# tests/minio_store.rs (H1b, the real-MinIO integration proof) needs the container lifecycle
+# tests/s3_store.rs (H1b, the real S3-server integration proof; question 256) needs the container lifecycle
 # helpers and the docker-gate/lock/label/prune discipline this workspace already has ONE home
 # for -- crates/av-lockstep/src/docker.rs (`ManagedContainer::run_local`, `recorded_digest_gate`,
 # `lock_docker_tests`, `prune_stale_test_resources`, `test_label_args`, `announce_gate_skip`).

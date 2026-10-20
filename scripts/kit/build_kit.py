@@ -51,7 +51,7 @@ GATED, opt-in, off by default:
   wheel that bundles a GPL-family library is not carried but recorded in `wheels.operator_supplied`.
 - `--with-binaries` -- round 2: cross-built Linux service binaries (`av-ingest-server`,
   `av-command`) the zero-egress install proof will start inside a container.
-- `--declare-operator-supplied NAME` (repeatable) -- question 250(a), task 3: a service image (MinIO,
+- `--declare-operator-supplied NAME` (repeatable) -- question 250(a), task 3: a service image (Versity Gateway,
   PostGIS) the site receiving the kit deploys and supplies itself; recorded in
   `KIT_MANIFEST.operator_supplied_declared`, never carried. ClickHouse is refused (question 247).
 
@@ -1095,7 +1095,7 @@ def build(
 ) -> tuple[Path, str]:
     """Assembles a kit at `out` and writes its `KIT_MANIFEST`. Returns `(manifest_path,
     manifest_sha256)` -- the sha256 is computed AFTER writing, never embedded in the manifest
-    itself (Decision L). `declare_operator_supplied` names service images (MinIO, PostGIS) the
+    itself (Decision L). `declare_operator_supplied` names service images (Versity Gateway, PostGIS) the
     receiving site supplies itself; recorded in `KIT_MANIFEST.operator_supplied_declared`, refused
     before anything is written if a name is not a declarable pin (`operator_check.declaration_problems`)."""
     kit_root = out
@@ -1267,7 +1267,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--declare-operator-supplied", action="append", default=[], dest="declare_operator_supplied", metavar="NAME",
         help="repeatable (question 250(a), task 3): a service image the site receiving this kit deploys and "
-             "supplies itself (docs/kit-operator-supplied.md items 5-6: minio, postgis), recorded in "
+             "supplies itself (docs/kit-operator-supplied.md items 5-6: versitygw, postgis), recorded in "
              "KIT_MANIFEST.operator_supplied_declared so the installer's image step verifies it by digest. The "
              "kit never carries it. Refused for a name that is not a declarable service image in "
              "scripts/kit/operator_supplied.json, and for clickhouse (held out of the kit, question 247).",

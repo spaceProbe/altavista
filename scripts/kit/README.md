@@ -56,7 +56,7 @@ GMAT's descriptor, which makes the installer require the operator's own GMAT tre
 
 (`--max-pack-bytes` must exceed the GMAT tree's own ~770 MB, or that step refuses rather than
 silently skipping it. The descriptor hashes the tree; none of its bytes land in the kit.) A site that
-deploys MinIO or PostGIS adds `--declare-operator-supplied minio` / `postgis`. `--with-wheels`,
+deploys the object store (Versity Gateway, Apache-2.0; its upstream image has GPL-2.0-only Alpine base layers) or PostGIS adds `--declare-operator-supplied versitygw` / `postgis`. `--with-wheels`,
 `--with-binaries` and (only if `cargo vendor --offline`
 genuinely fails) `--with-vendor` are the steps that touch the network, and only at kit-build time
 (question 154) -- see "Where this uses the network" below.
@@ -419,7 +419,7 @@ and the tree mounted read-only); Colima's VM is aarch64, so the x86_64 tree is m
 
 `scripts/kit/operator_supplied.json` pins all seven components of `docs/kit-operator-supplied.md` that
 have a pin: the two base images (items 1 and 2, `container-base-image`), GMAT (item 3, `data-tree`, per
-platform), the three service images (items 4 to 6, `container-image`: ClickHouse, MinIO, PostGIS) and the
+platform), the three service images (items 4 to 6, `container-image`: ClickHouse, Versity Gateway, PostGIS) and the
 numpy wheel (item 7, `python-wheel`). Item 8, Python >= 3.11 on the installing host, is a version floor
 that `install.sh` enforces before anything else; it has no pin and is not in the list. Each entry records
 its doc item, kind, the licences that make it operator-supplied, and `verification` (which step checks it
@@ -432,7 +432,7 @@ base image for each image the kit carries (`images.<c>.collected`), GMAT when `p
 wheel when `wheels.operator_supplied` names it, a service image only when
 `KIT_MANIFEST.operator_supplied_declared` names it. That list is filled by
 
-    .venv/bin/python scripts/kit/build_kit.py --out DIR --declare-operator-supplied minio --declare-operator-supplied postgis
+    .venv/bin/python scripts/kit/build_kit.py --out DIR --declare-operator-supplied versitygw --declare-operator-supplied postgis
 
 for a site that deploys the heavy track (default: empty). The builder refuses a name that is not a service
 image in the pins file, a base or GMAT (those follow from what the kit carries), and `clickhouse`, which
@@ -445,7 +445,7 @@ all seven, in item order (the examples are a selection):
 
     operator-supplied: ubuntu-22.04-base-image  required (base of cfs-image)  verified sha256:2edbbc5dc405… via Id
     operator-supplied: gmat-r2026a  required (packs.gmat)  verified macos-arm64 sha256:d21cddbbffbd… 2060 files
-    operator-supplied: minio  required (declared at build time: --declare-operator-supplied minio)  verified by the image step, not here (record: IMAGE_BUILD_RECORD operator_supplied; this step does not read it)
+    operator-supplied: versitygw  required (declared at build time: --declare-operator-supplied versitygw)  verified by the image step, not here (record: IMAGE_BUILD_RECORD operator_supplied; this step does not read it)
     operator-supplied: clickhouse  outside the kit, not verified (not declared; held pending licence review, q247)
     operator-supplied: postgis  outside the kit, not verified (not declared; a site that deploys it builds the kit with --declare-operator-supplied postgis)
     operator-supplied: debian-bookworm-slim-base-image  not required (the kit carries no application layer for edge-plugin-image), not verified

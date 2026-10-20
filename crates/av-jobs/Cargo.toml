@@ -58,7 +58,7 @@ av-yaml = { path = "../av-yaml" }
 # H5b-1 (docs/heavy-plan.md H5, round 3): src/bin/av-tile-fixture.rs -- the committed
 # tile-set generator binary the brief requires to live IN this crate ("do NOT create a new
 # crate; a new crate moves six SBOM epochs"), yet run a REAL job through the REAL av-store/
-# MinIO. That is only possible if av-store (and the async plumbing to drive it) is a real
+# S3 server. That is only possible if av-store (and the async plumbing to drive it) is a real
 # dependency of SOME target this package builds -- a `[[bin]]`'s dependencies are not
 # scoped separately from its package's, unlike a test/example/bench, which alone may draw on
 # [dev-dependencies] (verified directly: a bare `cargo build --bin` cannot see a
@@ -99,7 +99,7 @@ bytes = { version = "1", optional = true }
 av-catalog = { path = "../av-catalog", optional = true }
 
 [features]
-# H5b-1: enables src/bin/av-tile-fixture.rs's real-MinIO path (the `--dry-run` path needs
+# H5b-1: enables src/bin/av-tile-fixture.rs's real-S3-server path (the `--dry-run` path needs
 # none of this -- it uses this crate's own always-available MemoryObjectSource/
 # MemoryObjectSink). Never a default feature -- see the av-store dependency comment above.
 # `dep:av-catalog` added by question 228's finding 2 (pipeline half) -- see that dependency's
@@ -166,7 +166,7 @@ av-store = { path = "../av-store" }
 # av-lockstep: the same docker-gate/lock/label/prune discipline crates/av-store/Cargo.toml's
 # own dev-dependency comment explains (ManagedContainer::run_local, recorded_digest_gate,
 # lock_docker_tests, prune_stale_test_resources, test_label_args, announce_gate_skip) --
-# crates/av-store/tests/minio_store.rs is this test's own template, copied exactly.
+# crates/av-store/tests/s3_store.rs is this test's own template, copied exactly.
 av-lockstep = { path = "../av-lockstep" }
 # tokio: av_store::client::StoreClient's put/get/ensure_bucket/head are async
 # (crates/av-store/src/client.rs); crate::runner::ObjectSource::fetch/ObjectSink::put are
@@ -175,7 +175,7 @@ av-lockstep = { path = "../av-lockstep" }
 # runtime just to drain the queue). tests/store_tiler.rs bridges the two with one
 # tokio::runtime::Runtime the test owns and block_on's each store call against, never one
 # runtime per call. "rt-multi-thread" for Runtime::new(); "net" for the real TCP connect to
-# the MinIO container -- the identical feature pair crates/av-store/Cargo.toml's own
+# the S3 server container -- the identical feature pair crates/av-store/Cargo.toml's own
 # [dependencies] entry already declares (that crate's tokio, pulled in here transitively as
 # well, already carries "macros" for its own #[tokio::test]s; this crate's test uses no
 # #[tokio::test] of its own, so "macros" is not named again here).

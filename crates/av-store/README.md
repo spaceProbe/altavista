@@ -24,15 +24,20 @@ enforcement).
 cargo test -p av-store
 ```
 
-Every test in this crate today is docker-free: `src/sigv4.rs`'s known-answer tests against
+Most tests in this crate are docker-free: `src/sigv4.rs`'s known-answer tests against
 AWS's own published SigV4 vector, `src/keys.rs`/`src/metadata.rs`/`src/claim_check.rs`/
 `src/labels.rs`'s unit tests, `src/client.rs`'s error-XML-extractor and host/path-building
 tests, and `tests/claim_check_hot_path.rs`'s `cargo tree` proof.
 
-A second task adds this crate's MinIO integration test (a real object store, over the real
-S3 wire protocol this crate's `StoreClient` implements). When it lands, it will be
-docker-gated the way every docker test in this workspace is: labelled `av.test=1` /
-`av.test.run_id=<id>`, taking `av_lockstep::docker::lock_docker_tests()` for its whole body,
-and either running for real or skipping with a visible, named reason -- never passing
-silently. Until then, `StoreClient::new`'s support for a plain `http://127.0.0.1:<ephemeral>`
-endpoint (see `src/client.rs`'s module doc) is the seam that test needs, already in place.
+`tests/s3_store.rs` is the integration proof: it runs a real S3 server in a container and drives
+`StoreClient` against it over the real wire protocol (round trip by hash, a corrupted object, an
+over-clearance read, an unknown key, a wrong secret or unknown key id, a skewed clock, an idempotent
+`ensure_bucket`). Which server, and how to start it, comes from `services/store/IMAGE_DIGEST.md`
+(question 256): the pull-by-digest reference and its recorded local id, and a launch record
+(container port, health path, credential environment, server arguments) that
+`av_lockstep::docker::parse_recorded_launch` reads at test time. The test names no server, so a
+different record exercises a different server unchanged. It is docker-gated the way every docker
+test in this workspace is: the local image must match the recorded id (it never pulls), the
+container is labelled `av.test=1` / `av.test.run_id=<id>`, the test takes
+`av_lockstep::docker::lock_docker_tests()` for its whole body, and it either runs for real or skips
+with a visible, named reason -- never passing silently.

@@ -1,53 +1,96 @@
 # services/store/IMAGE_DIGEST.md
 
-The H1 object-store tier's image (ADR-003's `store` tier; question 39: "S3 API via MinIO").
-Pulled ONCE at setup, by digest, on 2026-09-15 (heavy track round 1). Question 154: the pull
-is the one-time setup step; no test ever pulls. Question 212(a): every image a test depends
-on records its digest here, and the test compares the RUNNING image to this record before it
-trusts it.
+The H1 object-store tier's image (ADR-003's `store` tier; question 39 as amended by question 256:
+an S3 API, served on this host by an Apache-2.0 S3-compatible server chosen by trial). Pulled ONCE,
+by digest, on 2026-10-19 (question 154: the pull is the one-time setup step; no test ever pulls).
+Question 212(a): every test that starts it compares the local image to the record below before it
+trusts it, and reads how to start it from the launch record below (one home for both).
 
 ## Image
 
+- Server: Versity S3 Gateway (`versitygw`) v1.9.0, POSIX backend, single-account mode.
+- Source repository: https://github.com/versity/versitygw (tag `v1.9.0`, image label
+  `org.opencontainers.image.revision` = `ca4c8d30f579a5ac3dd8c91bbfa8340c69dac0ac`).
+- Licence: Apache-2.0, read from the project's own `LICENSE` at tag `v1.9.0` (sha256
+  `c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4`) and the image's own
+  `org.opencontainers.image.licenses` label.
 - Registry reference (pull by digest, never by the tag alone):
 ```
-quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+versity/versitygw@sha256:eb7f786fcd91e72194e48fcf1ac16302d686bf8e3a71434bdbc067a6efd3fdc7
 ```
-- Tag this digest carried when it was pulled: `quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z`
-- `docker image inspect --format '{{.Id}}'` on this host (Colima, containerd image store, so
-  the image id and the manifest digest are the same string here):
+- Tag this digest carried when it was pulled: `versity/versitygw:v1.9.0` (Docker Hub; the project's
+  `.github/workflows/docker.yml` publishes to `versity/versitygw` and `ghcr.io/versity/versitygw`;
+  the digest is the OCI image index, so an x86_64 host resolves the same reference to its own
+  platform manifest).
+- `docker image inspect --format '{{.Id}}'` on this host (Colima, containerd image store, so the
+  image id and the index digest are the same string here):
 ```
-sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+sha256:eb7f786fcd91e72194e48fcf1ac16302d686bf8e3a71434bdbc067a6efd3fdc7
 ```
-- Architecture: `arm64` (this host is arm64 Colima; the manifest list also carries amd64 and
-  ppc64le, so the P5 kit on an x86_64 host resolves the same tag to a different digest and
-  must record its own).
+- Platform manifests in the index: linux/arm64 `sha256:f9768331c89d485fa0990d54aba88e06f3a035a54de7964f85a2882d8537665d`,
+  linux/amd64 `sha256:57b45f18ff79cc2fc28aa6eb49920abd96be9786569842b7c5f783cc8ad5a1a4`.
 
-## Why quay.io and not `minio/minio` on Docker Hub
+## Launch record (read by the tests; one fenced block per field)
 
-`docker pull minio/minio:...` on this host answers "pull access denied for minio/minio,
-repository does not exist or may require 'docker login'" (measured 2026-09-15): MinIO's
-Docker Hub namespace no longer serves these tags. `quay.io/minio/minio` is MinIO's own
-registry and carries the arm64 manifest.
-
-## Licensing (question 39)
-
-MinIO is AGPL-3.0. ADR-003's ruling stands: an **unmodified operational dependency**, run as
-a container and reached over the S3 HTTP API, never linked into any crate. `crates/av-store`
-links no MinIO code; it speaks S3 over HTTP with its own SigV4 signer.
-
-## Running it (tests do this themselves, under the host-wide docker lock)
-
+**Container port**
 ```
-docker run -d --label av.test=1 --label av.test.run_id=<id> \
-  -e MINIO_ROOT_USER=<user> -e MINIO_ROOT_PASSWORD=<password> \
-  -p 127.0.0.1::9000 \
-  quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e \
-  server /data
+7070
 ```
 
-No bind mount: the container's own filesystem holds `/data` and dies with it. This is
-deliberate -- Colima mounts only `$HOME` into its VM, so a bind mount from `/tmp` or
-`/private/var` would silently be an empty directory inside the container
-(`crates/av-lockstep/src/docker_test_lock.rs`'s own module doc records the same trap).
+**Health path** (GET, unauthenticated, answers 200 once the S3 gateway serves)
+```
+/health
+```
 
-Health: `GET /minio/health/live` answers `200` once the server is up (measured).
+**Credential environment** (one line per variable; the tests substitute a per-run generated
+`{access_key}` and `{secret_key}`, never a real credential)
+```
+ROOT_ACCESS_KEY_ID={access_key}
+ROOT_SECRET_ACCESS_KEY={secret_key}
+```
+
+**Server arguments** (one argument per line, passed after the image reference)
+```
+--health
+/health
+posix
+/tmp/vgw
+```
+
+Why each argument: `--health /health` turns on the unauthenticated health route; `posix /tmp/vgw`
+serves buckets as directories under `/tmp/vgw`, which the image creates (`IAM_DIR`/`SETUP_DIR`) and
+which lives in the container's own filesystem and dies with it. Object metadata is stored in
+extended attributes of that filesystem.
+
+## Why this server (question 256)
+
+Chosen by trial on 2026-10-19 over SeaweedFS 4.48
+(`chrislusf/seaweedfs@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d`, also
+Apache-2.0). Both passed every `av-store` and `av-jobs` container test (8 and 2). Both refused a wrong
+secret (`SignatureDoesNotMatch`), an unknown key (`InvalidAccessKeyId`) and a request signed an hour
+off (`RequestTimeTooSkewed`), each with 403. SeaweedFS drops an `x-amz-meta-*` header whose value is
+empty. `av-store` writes `x-amz-meta-av-provenance` empty for a default `Provenance`, so every object
+written that way read back as `MetadataMissing`, which gave 7 failures and 15 errors in the
+store-dependent Python tests. This server keeps the empty value, and those tests pass (81 passed; the
+one skip is the cFS build-artifact check, unrelated). The tables are in `docs/heavy-plan.md`, under
+the S3 server round.
+
+Known limitations, recorded:
+
+- The upstream image is built from a tree its own build info calls dirty (`go version -m` on
+  `/usr/local/bin/versitygw` reports the module as `v1.9.0+dirty`).
+- Object metadata lives in extended attributes of the container's filesystem (measured to work on
+  this host's overlayfs).
+- The server runs in single-account mode (one root key pair), which is all `av-store` uses.
+
+## History
+
+- **2026-09-15 to 2026-10-19: MinIO.**
+  `quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e`
+  (tag `RELEASE.2025-04-22T22-12-26Z`, arm64; its `docker image inspect` Id was the same string).
+  It is AGPL-3.0, run unmodified as an operational dependency (ADR-003, question 39). It was started
+  with `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` and `server /data` on port 9000, with health on
+  `GET /minio/health/live`. It came from quay.io because Docker Hub's `minio/minio` did not serve
+  these tags (measured 2026-09-15). On 2026-10-18 k3s's kubelet image garbage collection removed the
+  local copy (question 255). quay.io then refused the digest anonymously (401), and Docker Hub serves
+  no `minio/minio`, so it could not be restored. Question 256 replaced it with the trial above.

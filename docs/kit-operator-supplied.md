@@ -79,7 +79,7 @@ component in the table below comes from the operator.
 | 2 | Debian 12 bookworm-slim base image (under the edge-plugin image) | OS userland in the image's base layers | GPL (e.g. `bash`, `coreutils`, `tar`, `sed`, `findutils`, `login`), LGPL (`libc6`, `libgnutls30`, `libgmp10`) | `debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171` |
 | 3 | GMAT R2026a | Bundles OpenSceneGraph (`libosg*`, `libOpenThreads`, `osgdb_*` plugins) and wxWidgets (`libwx_*`) | OSGPL (LGPL-2.1 with extra permissions), wxWindows Library Licence (LGPL-2.0+ with a binary exception); GMAT itself is Apache-2.0 | content hash of the unpacked tree under a scope, per platform, below |
 | 4 | ClickHouse server (only where the MoE store is deployed) | Static LGPL libraries in the server binary | LGPL (libgsasl, libssh, mariadb-connector-c, numactl, xz, lemmagen-c), GPL-2.0-or-BSD (ittapi), MPL-2.0; ClickHouse itself is Apache-2.0 | `clickhouse/clickhouse-server@sha256:6ded2b2c2f2c46f12784bd8000c75f8aa7363372ed64afccaa932456b8cb41e4` (26.8.29.10 LTS; arm64 manifest `sha256:b4e4a09d5c05a17640315aeb72aeab3fe03c96a937f414526a7c1ebda3201cb0`). Held out of the kit pending the user's review (question 247) |
-| 5 | MinIO (only where the heavy track's object store is deployed) | Network service | AGPL-3.0, run unmodified and reached over S3 HTTP (question 39) | `quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e` (`RELEASE.2025-04-22T22-12-26Z`). **As of 2026-10-19 this digest can no longer be fetched** (quay.io refuses it anonymously; Docker Hub serves no `minio/minio`); a site that already holds it can still verify it, and its replacement is open (question 255) |
+| 5 | Versity Gateway `versitygw` S3 server (only where the heavy track's object store is deployed) | Network service; the upstream image's Alpine 3.24.2 base layers carry GPL-2.0-only packages (question 251) | Versity Gateway is Apache-2.0. Base layers: GPL-2.0-only (`busybox`, `busybox-binsh`, `ssl_client`, `apk-tools`, `libapk`, `alpine-baselayout`, `alpine-baselayout-data`, `scanelf`), MIT AND BSD-2-Clause AND GPL-2.0-or-later (`musl-utils`), MPL-2.0 AND MIT (`ca-certificates-bundle`), MIT, Apache-2.0 or Zlib for the rest (`alpine-keys`, `alpine-release`, `musl`, `libcrypto3`, `libssl3`, `zlib`) | `versity/versitygw@sha256:eb7f786fcd91e72194e48fcf1ac16302d686bf8e3a71434bdbc067a6efd3fdc7` (`v1.9.0`, revision `ca4c8d30f579a5ac3dd8c91bbfa8340c69dac0ac`). Replaces MinIO (question 256) |
 | 6 | PostgreSQL + PostGIS (only where the catalog is deployed) | Network service | PostGIS is GPL-2.0-or-later (PostgreSQL itself is the permissive PostgreSQL licence), run unmodified over the Postgres wire protocol | `imresamu/postgis@sha256:f8a700accce9a1fb24e14b73a3abf8e90439ce8f192c57b8cb93cc650694e8dd` (`17-3.5-alpine`, PostGIS 3.5.4) |
 | 7 | numpy 2.5.3 wheel for linux/aarch64/cp313 (only for a kit built with `--with-wheels`) | The wheel bundles `libgfortran`, GPL code | `libgfortran`: GPL-3.0-or-later WITH GCC-exception-3.1. The wheel's other bundled library, OpenBLAS, is BSD-3-Clause AND BSD-3-Clause-Open-MPI; numpy itself is BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | `numpy-2.5.3-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl`, `sha256:c76d5dde9f445058f83d0c02af00557a4db91de9a9a57c0df87d1535001d654b`, from PyPI |
 | 8 | Python 3.11 or newer, on the host that runs the installer (the enclave host for the files install, and the Docker host for the image step) | The kit carries no interpreter, and `install.sh` runs `install.py` with the operator's | None: the PSF licence is not copyleft. Listed because the kit does not carry it and the install cannot start without it | A version floor, not a hash: Python >= 3.11 (the standard library's `tomllib`, which the bundled modules use) |
@@ -181,13 +181,28 @@ binaries were never started; the installer's check reads bytes only.
 ### Items 4 to 6: service images and ClickHouse
 
 Items 5 and 6 are not in the kit and never were. A site that deploys the heavy track builds its kit
-with `build_kit.py --declare-operator-supplied minio --declare-operator-supplied postgis`; the
+with `build_kit.py --declare-operator-supplied versitygw --declare-operator-supplied postgis`; the
 names go into `KIT_MANIFEST.operator_supplied_declared` (empty by default). The image step then
 verifies each declared image by digest, with the same lookup as for a base (`docker image inspect`:
 `Id` or `RepoDigests` equals the pin), and refuses before any build if one is absent or different
 (`operator-image-missing`, `operator-image-digest-differs`, naming reference and digest). It does not
 pull or load it. An undeclared service is listed as `outside the kit, not verified`. The pins match
 `services/store/IMAGE_DIGEST.md` and `services/catalog/IMAGE_DIGEST.md`.
+
+**Why the object store (item 5) is operator-supplied (questions 251, 256).** The server is Versity
+Gateway v1.9.0 (`versitygw`, Apache-2.0, source https://github.com/versity/versitygw, revision
+`ca4c8d30f579a5ac3dd8c91bbfa8340c69dac0ac`), pinned by digest exactly as PostGIS is. The server is
+permissive, but its upstream image is not: the image's base layers are Alpine 3.24.2, and its package
+database (`/lib/apk/db/installed`, read with `docker run --rm --pull never --network none`) lists
+GPL-2.0-only `busybox`, `busybox-binsh`, `ssl_client`, `apk-tools`, `libapk`, `alpine-baselayout`,
+`alpine-baselayout-data` and `scanelf`; `musl-utils` (MIT AND BSD-2-Clause AND GPL-2.0-or-later);
+`ca-certificates-bundle` (MPL-2.0 AND MIT); and MIT, Apache-2.0 or Zlib for `alpine-keys`,
+`alpine-release`, `musl`, `libcrypto3`, `libssl3` and `zlib`. The kit redistributes no GPL or LGPL
+code (question 251), so it cannot carry that image whole. Carrying only an application layer (the
+static Go binary on the pinned Debian base) is a follow-up the heavy team's manager proposed to the
+lead; it is not part of this item. The pin replaces MinIO's (AGPL-3.0; its digest could no longer be
+fetched, question 255); `services/store/IMAGE_DIGEST.md` keeps MinIO's old digest under its History
+section, and the pin matches the record's current Registry reference, not the history.
 
 ClickHouse (item 4) cannot be declared: the builder refuses the name and the installer refuses a
 manifest that declares it (question 247, held pending the user's licence review). Its digest and

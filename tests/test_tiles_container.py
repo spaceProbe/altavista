@@ -1,5 +1,5 @@
 """Heavy track, round 3, task P4: `docs/heavy-plan.md` H4's remaining round-2 open item 6 --
-"a docker-gated proof of av-tiles serving out of a real MinIO. The store-backed `ObjectSource`
+"a docker-gated proof of av-tiles serving out of a real S3 store. The store-backed `ObjectSource`
 exists and is what the binary runs on; only the container-backed test is missing" -- built out
 this round to prove the GATEWAY itself running as a container from a scripted, digest-recorded
 image (`services/tiles/Dockerfile` + `services/tiles/build-image.sh` + `services/tiles/
@@ -12,7 +12,7 @@ unable to resolve the manifest at all, regardless of which crate is actually bei
 
 `crates/av-jobs/tests/store_tiler.rs` already proves the store-backed seam this task's own brief
 cites ("`ObjectSource` exists ... `store_tiler.rs` already proves that seam end to end") from
-Rust, against a real MinIO container, using `av_lockstep::docker` for the container lifecycle.
+Rust, against a real S3-store container, using `av_lockstep::docker` for the container lifecycle.
 What is missing, and what this file adds, is the GATEWAY PROCESS ITSELF running as a container --
 a Docker build-and-run concern, not a library-seam concern. Every existing docker-gated proof of
 "a scripted, digest-recorded image, run as a container, with its own hardening asserted" in this
@@ -29,14 +29,14 @@ test in this repository -- not a second, Rust-flavoured copy of the same reasoni
 # What this file reuses, and what it adds
 
 `tests/heavy_stack.py` already has everything except the container itself: `rust_bins` (builds
-`av-tile-fixture`), `minio` (a real, labelled MinIO container), `key_prefix`/`tile_set_label`,
-`tile_set` (a real tile set built against that MinIO by `av-tile-fixture`). This round added
+`av-tile-fixture`), `s3_store` (a real, labelled S3-store container), `key_prefix`/`tile_set_label`,
+`tile_set` (a real tile set built against that S3 store by `av-tile-fixture`). This round added
 `tiles_gateway_container` to that same module -- the containerised sibling of `av_tiles_service`
 (the existing host-subprocess gateway `tests/test_viewer_tiles_route.py` already uses), deliberately
 a plain `@contextlib.contextmanager` rather than a `@pytest.fixture` (see its own doc for why:
 this file's own "the container is gone afterward" assertion needs to run, within the SAME test,
 after that context manager's own teardown) -- and `TILES_SKIP_REASON`/
-`_parse_tiles_image_digest_md` beside `SKIP_REASON`'s own identical MinIO gate. See
+`_parse_tiles_image_digest_md` beside `SKIP_REASON`'s own identical S3-store gate. See
 `tests/heavy_stack.py`'s own module doc section on both for the full reasoning (the `--bind
 0.0.0.0` trap, the `$HOME`-rooted scratch issuer, the no-writable-volume hardening story) -- not
 repeated a second time here.
@@ -53,7 +53,7 @@ torn down -- confirm it is gone.
 # Docker-gated, in this workspace's exact discipline (question 194)
 
 A module-level skip reason is already computed at import time inside `tests/heavy_stack.py`
-(`SKIP_REASON` for MinIO, `TILES_SKIP_REASON` for `av-tiles:local`, the latter checked against
+(`SKIP_REASON` for the S3 store, `TILES_SKIP_REASON` for `av-tiles:local`, the latter checked against
 its own recorded digest per question 212(a)); this file's own gate is their combination, printed
 as one reason so `-rs` output names BOTH possible causes rather than only the first one checked.
 The host-wide docker-test lock (`altavista.docker_test_lock.lock_docker_tests`), label-based
@@ -97,14 +97,14 @@ import pytest
 
 from altavista.container_hardening import assert_exec_hardening, assert_inspect_hardening
 from altavista.pb.altavista.v1 import heavy_pb2
-from heavy_stack import (  # noqa: F401 -- rust_bins/minio/tile_set are transitive fixture deps
+from heavy_stack import (  # noqa: F401 -- rust_bins/s3_store/tile_set are transitive fixture deps
     SKIP_REASON,
     TILES_SKIP_REASON,
     _valid_claims,
     admin_counter,
     key_prefix,
-    minio,
-    minio_bucket,
+    s3_store,
+    store_bucket,
     rust_bins,
     tile_set,
     tile_set_label,
@@ -118,9 +118,9 @@ REFUSAL_COUNTER_CODE = "tiles_layer_label_over_clearance"
 
 @pytest.mark.skipif(COMBINED_SKIP_REASON is not None, reason=COMBINED_SKIP_REASON or "")
 def test_tiles_gateway_container_serves_a_real_tile_counts_a_refusal_and_is_removed(
-    rust_bins, minio, key_prefix, tile_set_label, tile_set
+    rust_bins, s3_store, key_prefix, tile_set_label, tile_set
 ):
-    with tiles_gateway_container(rust_bins, minio, key_prefix, tile_set_label) as gateway:
+    with tiles_gateway_container(rust_bins, s3_store, key_prefix, tile_set_label) as gateway:
         issuer = gateway.issuer
 
         # Minted directly against this context manager's OWN scratch-rooted issuer (see its own

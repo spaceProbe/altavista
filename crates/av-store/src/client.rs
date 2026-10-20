@@ -12,7 +12,7 @@
 //! each request's URI scheme itself and only performs the TLS handshake when it is
 //! `https://` -- an `http://` URI is passed straight through to the inner `HttpConnector`
 //! with no TLS at all. So one client type serves both a real `https://` deployment and the
-//! next task's `http://127.0.0.1:<ephemeral>` MinIO container with no branch in this crate's
+//! next task's `http://127.0.0.1:<ephemeral>` S3-server container with no branch in this crate's
 //! own code, which is exactly the seam that task needs (`docs/heavy-plan.md` H1's own
 //! "Seams the next task needs": "`StoreClient::new` must accept a plain-HTTP endpoint").
 //! Never `rustls`, never `ring` -- ADR-004.
@@ -24,7 +24,7 @@
 //! `SystemTime::now()`, and `StoreClient` itself carries no clock field at all -- this is
 //! rule 7 ("clocks injected, never slept"). It is also what makes this crate's own tests
 //! reproducible with no wall-clock dependency: a caller (this crate's own `#[tokio::test]`s,
-//! and the next task's MinIO integration test) can sign a request as if it were any instant.
+//! and the next task's S3 integration test) can sign a request as if it were any instant.
 //!
 //! # `x-amz-content-sha256` is always the real payload hash
 //!
@@ -63,17 +63,17 @@ type HttpClient = LegacyClient<HttpsConnector<HttpConnector>, Full<Bytes>>;
 /// plain data (no global state anywhere in this crate) -- constructing two `StoreClient`s
 /// from two different `StoreConfig`s talks to two independent stores, sharing nothing.
 pub struct StoreConfig {
-    /// Scheme + authority the client connects to (`https://minio.example.com:9000`, or the
+    /// Scheme + authority the client connects to (`https://s3.example.com:9000`, or the
     /// next task's `http://127.0.0.1:<ephemeral>`). Never includes a path.
     pub endpoint: Uri,
-    /// The SigV4 region string (MinIO accepts any value here; a real S3 deployment requires
-    /// the bucket's actual region).
+    /// The SigV4 region string (a local S3-compatible test server, e.g. MinIO, accepts any value here; a real S3
+    /// deployment requires the bucket's actual region).
     pub region: String,
     pub access_key_id: String,
     pub secret_access_key: String,
     pub bucket: String,
-    /// `true` for `<endpoint>/<bucket>/<key>` (path-style -- what MinIO's own docs recommend
-    /// and what the next task's integration test uses); `false` for
+    /// `true` for `<endpoint>/<bucket>/<key>` (path-style -- what self-hosted S3-compatible servers' docs
+    /// generally recommend and what the next task's integration test uses); `false` for
     /// `<scheme>://<bucket>.<endpoint-host>/<key>` (virtual-hosted-style, real AWS S3's
     /// modern default). Controls both the request's `Host` header and its path -- see
     /// [`StoreClient::host_and_path`].
@@ -175,7 +175,7 @@ impl StoreClient {
     }
 
     /// PUT the bucket itself, tolerating `BucketAlreadyOwnedByYou`/`BucketAlreadyExists`
-    /// (MinIO's/S3's own "this bucket exists and you already own it" responses to a repeat
+    /// (S3's own (and S3-compatible servers') "this bucket exists and you already own it" responses to a repeat
     /// `ensure_bucket` call, which is exactly the idempotent "make sure it exists" contract
     /// this method's name promises -- a second call is not a defect to surface as an error).
     pub async fn ensure_bucket(&self, now_unix_secs: i64) -> Result<(), StoreError> {
@@ -216,7 +216,7 @@ impl StoreClient {
     /// label first means a caller without clearance never causes this crate to transfer
     /// bytes it should not have asked for in the first place (no network cost for a refusal
     /// this crate can already see coming from the `AssetRef` alone, with no dependence on
-    /// what MinIO itself would have done); checking the hash only *after* the fetch is the
+    /// what the S3 server itself would have done); checking the hash only *after* the fetch is the
     /// only order possible (there is nothing to hash before the bytes exist), but doing it as
     /// the last step means a caller only ever sees bytes that have already cleared both the
     /// authorization and integrity checks -- there is no window where partially-checked bytes
@@ -274,7 +274,7 @@ fn key_from_uri(uri: &str) -> Result<String, StoreError> {
     Ok(key.to_string())
 }
 
-/// One S3/MinIO error response, decomposed. See [`parse_s3_error_xml`] for how `code`/
+/// One S3 error response, decomposed. See [`parse_s3_error_xml`] for how `code`/
 /// `message`/`request_id` are extracted from the body.
 struct S3Error {
     status: StatusCode,
@@ -304,7 +304,7 @@ fn parse_s3_error(status: StatusCode, body: &[u8]) -> S3Error {
     S3Error { status, code, message, request_id }
 }
 
-/// Hand-rolled extractor for S3's/MinIO's `<Error><Code>...</Code><Message>...</Message>
+/// Hand-rolled extractor for S3's (and S3-compatible servers') `<Error><Code>...</Code><Message>...</Message>
 /// ...<RequestId>...</RequestId></Error>` XML shape -- no XML crate (this task's brief is
 /// explicit: "no XML crate"), because this shape is three flat, non-nested, non-attributed
 /// tags, and a real XML parser's generality (namespaces, CDATA, entity references beyond the
@@ -333,11 +333,12 @@ fn extract_tag(xml: &str, tag: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// A representative MinIO/S3 `<Error>` response body, in the documented S3 API shape
-    /// (`services/store/IMAGE_DIGEST.md`: MinIO speaks the real S3 error XML shape, not a
+    /// A representative S3 `<Error>` response body, in the documented S3 API shape
+    /// (S3 servers such as MinIO and Versity Gateway speak the real S3 error XML shape, not a
     /// bespoke one) -- hand-authored from that documented shape rather than captured from a
-    /// live container, since this task's tests run docker-free (the next task's MinIO
+    /// live container, since this task's tests run docker-free (the next task's S3
     /// integration test is where a byte-for-byte captured fixture would come from instead).
+    /// The const names keep their original `MINIO_` prefix; the content is unchanged.
     const MINIO_NO_SUCH_KEY: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message><Key>imagery/ab/cd/abcd...</Key><BucketName>altavista-heavy</BucketName><Resource>/altavista-heavy/imagery/ab/cd/abcd...</Resource><RequestId>176C2A7F3E2B4B11</RequestId><HostId>dd9025bab4ad464b049177c95eb6ebf374d3b3fd1af9251148b658df7ac2e3e8</HostId></Error>"#;
 
@@ -382,7 +383,7 @@ mod tests {
     }
 
     /// `NoSuchBucket` maps to `NotFound` too, even checked against a status other than 404 --
-    /// the code alone is enough (S3/MinIO do not always pair `NoSuchBucket` with a literal 404
+    /// the code alone is enough (S3 and S3-compatible servers do not always pair `NoSuchBucket` with a literal 404
     /// in every response shape), never only the numeric status.
     #[test]
     fn into_store_error_maps_no_such_bucket_to_not_found_by_code_alone() {
@@ -433,7 +434,7 @@ mod tests {
 
     #[test]
     fn store_client_new_accepts_a_plain_http_endpoint() {
-        // The seam the next task's MinIO integration test needs: StoreClient::new must not
+        // The seam the next task's S3 integration test needs: StoreClient::new must not
         // require an https:// endpoint or fail on one that is http://.
         StoreClient::new(test_config(true)).unwrap();
     }

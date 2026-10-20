@@ -117,15 +117,18 @@ fn bearer_token(authorization: Option<&str>) -> &str {
     }
 }
 
-/// Fetches the object at `key` through `source`, treating a backend error the same as "not
-/// found" for THIS refusal (a deliberate simplification for this round: this crate's own
-/// `ObjectSourceError` has only two variants, and a caller-visible distinction between "truly
-/// absent" and "the store failed to answer" is not something any test in this round's own
-/// brief asks for -- both are equally "this crate could not get the bytes it needed").
+/// Fetches the object at `key` through `source`. Two failures, two refusals (question 256):
+/// [`ObjectSourceError::NotFound`] -- the store said the key is absent -- is the caller's
+/// `not_found` refusal (`ManifestNotFound` / `TileObjectNotFound`, `404`/`502` as those
+/// variants define); [`ObjectSourceError::Backend`] -- the store failed to answer, or answered
+/// in a way that is not "absent" (a connect error, a non-404 S3 error, an object whose `av-*`
+/// metadata is missing) -- is [`TileRefusal::StoreBackend`], `502`, counted under its own
+/// code. The earlier "treat every backend error as not found" simplification is withdrawn:
+/// it answered `404` for a store failure, hiding the failure behind "no such manifest".
 fn fetch(source: &dyn ObjectSource, key: &str, not_found: impl Fn() -> TileRefusal) -> Result<crate::source::StoredObject, TileRefusal> {
     source.get(key).map_err(|e| match e {
         ObjectSourceError::NotFound { .. } => not_found(),
-        ObjectSourceError::Backend { .. } => not_found(),
+        ObjectSourceError::Backend { key, detail } => TileRefusal::StoreBackend { key, detail },
     })
 }
 
@@ -479,6 +482,84 @@ mod tests {
 
         assert_eq!(response.status, 404);
         assert_eq!(counters.get("tiles_manifest_not_found"), 1);
+        assert_eq!(counters.get("tiles_store_backend_error"), 0, "an absent key is not a store failure");
+    }
+
+    // -- Question 256: a store failure is not a 404 -----------------------------------------
+
+    /// An [`ObjectSource`] that answers `Backend` for every key in `failing` and delegates to
+    /// `inner` for the rest -- the store "answering in a way that is not absent".
+    #[derive(Debug)]
+    struct FailingObjectSource {
+        inner: crate::source::InMemoryObjectSource,
+        failing: Vec<String>,
+    }
+
+    impl ObjectSource for FailingObjectSource {
+        fn get(&self, key: &str) -> Result<crate::source::StoredObject, ObjectSourceError> {
+            if self.failing.iter().any(|k| k == key) {
+                return Err(ObjectSourceError::Backend { key: key.to_string(), detail: "simulated store failure".to_string() });
+            }
+            self.inner.get(key)
+        }
+    }
+
+    #[test]
+    fn a_backend_error_fetching_the_manifest_is_502_and_counted_as_store_backend_error_not_manifest_not_found() {
+        let issuer = TestIssuer::new();
+        let (inner, manifest_sha256, _bytes, entry) = fixture("UNCLASSIFIED");
+        let manifest_key = av_store::object_key(KEY_PREFIX, &manifest_sha256).unwrap();
+        let source = FailingObjectSource { inner, failing: vec![manifest_key] };
+        let config = tiles_config(&issuer, &[("operators", "UNCLASSIFIED")]);
+        let counters = Counters::new();
+        let token = mint(&issuer, &["operators"], NOW_UNIX_S, TTL_S);
+
+        for path in [format!("/v1/tilesets/{manifest_sha256}/manifest"), tile_path(&manifest_sha256, &entry)] {
+            let response = handle(&config, &source, &counters, &path, RequestHeaders::auth_only(Some(&format!("Bearer {token}"))), now_tai_ns());
+            assert_eq!(response.status, 502, "{path}: a store backend error must not be a 404");
+            assert!(response.body.is_empty(), "a refusal must never carry bytes");
+        }
+        assert_eq!(counters.get("tiles_store_backend_error"), 2);
+        assert_eq!(counters.get("tiles_manifest_not_found"), 0);
+        assert_eq!(counters.get("tiles_tile_object_not_found"), 0);
+    }
+
+    #[test]
+    fn a_backend_error_fetching_a_tile_object_is_502_and_counted_as_store_backend_error_not_tile_object_not_found() {
+        let issuer = TestIssuer::new();
+        let (inner, manifest_sha256, _bytes, entry) = fixture("UNCLASSIFIED");
+        let source = FailingObjectSource { inner, failing: vec![entry.object_key.clone()] };
+        let config = tiles_config(&issuer, &[("operators", "UNCLASSIFIED")]);
+        let counters = Counters::new();
+        let token = mint(&issuer, &["operators"], NOW_UNIX_S, TTL_S);
+
+        let response = handle(&config, &source, &counters, &tile_path(&manifest_sha256, &entry), RequestHeaders::auth_only(Some(&format!("Bearer {token}"))), now_tai_ns());
+
+        assert_eq!(response.status, 502, "a store backend error on a tile object must not be a 404");
+        assert!(response.body.is_empty(), "a refusal must never carry tile bytes");
+        assert_eq!(counters.get("tiles_store_backend_error"), 1);
+        assert_eq!(counters.get("tiles_tile_object_not_found"), 0);
+        assert_eq!(counters.get("tiles_manifest_not_found"), 0);
+    }
+
+    #[test]
+    fn an_absent_tile_object_stays_tile_object_not_found_and_is_not_a_store_backend_error() {
+        let issuer = TestIssuer::new();
+        let (inner, manifest_sha256, _bytes, entry) = fixture("UNCLASSIFIED");
+        // Replace the in-memory tile with nothing: a fresh source holding only the manifest.
+        let manifest_key = av_store::object_key(KEY_PREFIX, &manifest_sha256).unwrap();
+        let manifest = inner.get(&manifest_key).unwrap();
+        let only_manifest = crate::source::InMemoryObjectSource::new();
+        only_manifest.insert(manifest_key, manifest.bytes, manifest.label);
+        let config = tiles_config(&issuer, &[("operators", "UNCLASSIFIED")]);
+        let counters = Counters::new();
+        let token = mint(&issuer, &["operators"], NOW_UNIX_S, TTL_S);
+
+        let response = handle(&config, &only_manifest, &counters, &tile_path(&manifest_sha256, &entry), RequestHeaders::auth_only(Some(&format!("Bearer {token}"))), now_tai_ns());
+
+        assert_eq!(response.status, 502);
+        assert_eq!(counters.get("tiles_tile_object_not_found"), 1);
+        assert_eq!(counters.get("tiles_store_backend_error"), 0);
     }
 
     // -- A malformed route is refused before any auth/store work happens ------------------

@@ -1,5 +1,5 @@
 """H5b-2 (docs/heavy-plan.md H5, round 3): the shared docker-gated "stand up a real
-`av-tiles` gateway, backed by a real MinIO, serving a real tile set built by a real
+`av-tiles` gateway, backed by a real S3 object store, serving a real tile set built by a real
 `av-tile-fixture` run" stack-up, extracted out of `tests/test_viewer_tiles_route.py`
 (H5b-1) so `tests/test_viewer_layers_stream.py` (H5b-2 deliverable 4) can stand up the
 IDENTICAL real stack rather than a second, independently-drifting copy of it --
@@ -9,12 +9,21 @@ applied here to test infrastructure rather than to application logic.
 Every fixture and helper below is copied verbatim (same behaviour, same reasoning) from
 `tests/test_viewer_tiles_route.py`'s own H5b-1 commit; that file's own module docstring
 already explains WHY each piece exists (the digest gate, the host-wide docker-test
-lock, the labelled MinIO container, the `LocalTestIssuer`, the readiness poll) and is
+lock, the labelled S3-store container, the `LocalTestIssuer`, the readiness poll) and is
 not repeated a second time here -- see it for the full reasoning. This file is the ONE
 home for that reasoning and that code now; `tests/test_viewer_tiles_route.py` imports
 every one of these names rather than redefining any of them, and this file's own
 9-passed baseline is unchanged (see that file's own module docstring for the
 byte-for-byte "nothing else changed" requirement this extraction had to preserve).
+
+# The S3 store is whatever `services/store/IMAGE_DIGEST.md` records (question 256)
+
+The object store's image, its container port, its health path, its credential environment and
+its server arguments are all read from that file's launch record through
+`altavista/store_record.py` (the one Python reader of it); nothing in this module names a
+particular S3 server, so replacing the server is an edit of the record. Every store container is
+removed with `docker rm -f -v`: the server image may declare a `VOLUME`, and without `-v` each
+run would leave an anonymous volume behind (question 249).
 
 # How a second test module reuses this
 
@@ -22,14 +31,14 @@ Pytest fixtures imported by name into another test module become usable fixtures
 THAT module too (a standard, documented pytest pattern -- "sharing fixtures across
 multiple files" -- not a bespoke mechanism this file invents): a module does
 
-    from heavy_stack import rust_bins, minio, tile_set, issuer, av_tiles_service, ...
+    from heavy_stack import rust_bins, s3_store, tile_set, issuer, av_tiles_service, ...
 
 and every one of those becomes available to its own test functions by name, exactly as
-if it had defined them itself. `key_prefix`/`tile_set_label`/`minio_bucket` are
+if it had defined them itself. `key_prefix`/`tile_set_label`/`store_bucket` are
 themselves fixtures (not plain module constants) specifically so a second test module
 COULD override them with its own fixture of the same name if it ever needed a
 different key prefix or clearance label -- in practice neither existing caller does,
-because each `minio`/`av_tiles_service` fixture instance is a brand-new container/
+because each `s3_store`/`av_tiles_service` fixture instance is a brand-new container/
 process every time (`run_id` below always carries a fresh `uuid.uuid4()`), so nothing
 protects two SEPARATE test modules' fixture instances from using the identical default
 values already reachable by that indirection.
@@ -68,22 +77,26 @@ import pytest
 
 from altavista.container_hardening import HARDENING_RUN_FLAGS, label_args, prune_stale_labelled_resources
 from altavista.docker_test_lock import lock_docker_tests
+from altavista.store_record import STORE_IMAGE_DIGEST_MD, StoreRecord, fenced_block_after, parse_store_record
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUSTUP_PATH_PREFIX = "/opt/homebrew/opt/rustup/bin"
-IMAGE_DIGEST_MD = REPO_ROOT / "services" / "store" / "IMAGE_DIGEST.md"
+IMAGE_DIGEST_MD = STORE_IMAGE_DIGEST_MD
+# Kept under its old name for `tests/test_clickhouse_sweep_panel.py`; the one definition is
+# `altavista.store_record.fenced_block_after`.
+_fenced_block_after = fenced_block_after
 
 # Measured directly on this host (question 148: not assumed) -- see
 # tests/test_viewer_tiles_route.py's own H5b-1 commit for the full first-launch
 # syspolicyd/AMFI code-signing measurement this value is based on.
 READY_TIMEOUT_S = 240.0
-MINIO_HEALTH_TIMEOUT_S = 30.0
+STORE_HEALTH_TIMEOUT_S = 30.0
 CARGO_BUILD_TIMEOUT_S = 900.0  # this host has been observed taking over 600s on a cold tree.
 
 TEST_ISSUER = "https://sso.test.example/"
 TEST_AUDIENCE = "av-tiles"
 LADDER = "UNCLASSIFIED,CUI,SECRET"
-MINIO_REGION = "us-east-1"
+STORE_REGION = "us-east-1"
 
 
 def _cargo_env() -> dict:
@@ -141,32 +154,19 @@ def _valid_claims(sub: str, groups: list) -> dict:
 
 
 # =================================================================================================
-# services/store/IMAGE_DIGEST.md parsing -- mirrors crates/av-store/tests/minio_store.rs's and
-# crates/av-jobs/tests/store_tiler.rs's own parse_image_digest_md/fenced_block_after/gate exactly.
+# services/store/IMAGE_DIGEST.md parsing -- the parsing itself lives in altavista/store_record.py
+# (the one Python reader of the record); mirrors crates/av-store/tests/s3_store.rs's and
+# crates/av-jobs/tests/store_tiler.rs's own record parsing/gate.
 # =================================================================================================
 
 
-def _fenced_block_after(text: str, marker: str) -> Optional[str]:
-    lines = text.splitlines()
-    marker_idx = next((i for i, line in enumerate(lines) if marker in line), None)
-    if marker_idx is None:
-        return None
+def _store_record() -> StoreRecord:
+    """The S3 store's image and launch record. A malformed record is a `RuntimeError` (so the
+    import-time gate below can turn it into a visible skip reason, as before)."""
     try:
-        fence_start = next(i for i in range(marker_idx, len(lines)) if lines[i].strip() == "```")
-        fence_end = next(i for i in range(fence_start + 1, len(lines)) if lines[i].strip() == "```")
-    except StopIteration:
-        return None
-    content = "\n".join(lines[fence_start + 1 : fence_end]).strip()
-    return content or None
-
-
-def _parse_image_digest_md() -> Tuple[str, str]:
-    text = IMAGE_DIGEST_MD.read_text()
-    image_ref = _fenced_block_after(text, "Registry reference")
-    recorded_id = _fenced_block_after(text, "docker image inspect")
-    if not image_ref or not recorded_id:
-        raise RuntimeError(f"could not find the 'Registry reference'/'docker image inspect' fenced code blocks in {IMAGE_DIGEST_MD}")
-    return image_ref, recorded_id
+        return parse_store_record(IMAGE_DIGEST_MD)
+    except ValueError as e:
+        raise RuntimeError(str(e)) from e
 
 
 def _docker_daemon_unavailable_reason() -> Optional[str]:
@@ -200,9 +200,10 @@ def _compute_skip_reason() -> Optional[str]:
     if daemon_reason is not None:
         return f"Docker not available: {daemon_reason}"
     try:
-        image_ref, recorded_id = _parse_image_digest_md()
-    except RuntimeError as e:
+        record = _store_record()
+    except (RuntimeError, OSError) as e:
         return str(e)
+    image_ref, recorded_id = record.image_ref, record.recorded_id
     actual_id = _local_image_id(image_ref)
     if actual_id is None:
         return (
@@ -459,7 +460,7 @@ def rust_bins():
 
 
 # =================================================================================================
-# The real, labelled MinIO container -- module-scoped, held under the host-wide docker-test
+# The real, labelled S3-store container -- module-scoped, held under the host-wide docker-test
 # lock for its ENTIRE life (creation through every test through teardown).
 # =================================================================================================
 
@@ -469,12 +470,47 @@ def _random_creds(run_id: str) -> Tuple[str, str]:
     return f"avheavystacktest{sanitized}", f"avheavystacktestsecret{sanitized}"
 
 
-def _wait_for_minio_health(host_port: int, container_id: str) -> None:
-    deadline = time.monotonic() + MINIO_HEALTH_TIMEOUT_S
+def remove_store_container(container_id: str) -> None:
+    """`docker rm -f -v`: the store image may declare a `VOLUME`, and a plain `rm -f` would leave
+    its anonymous volume behind on every run (question 249)."""
+    subprocess.run(["docker", "rm", "-f", "-v", container_id], capture_output=True, timeout=30)
+
+
+def start_store_container(record: StoreRecord, run_id: str) -> Tuple[str, int, str, str]:
+    """Starts the S3 store container exactly as the record says (labels, the record's credential
+    environment with per-run generated credentials, `-p 127.0.0.1::<container port>`, the
+    record's arguments). Returns `(container_id, host_port, access_key, secret_key)`. The caller
+    must already hold the docker-test lock and have pruned, and owns the container from here:
+    it waits for readiness (`_wait_for_store_health`) and removes it
+    (`remove_store_container`). If the container starts but its host port cannot be read, it is
+    removed here before failing."""
+    access_key, secret_key = _random_creds(run_id)
+    env_args = [arg for name, value in record.env(access_key, secret_key).items() for arg in ("-e", f"{name}={value}")]
+    cmd = [
+        "docker", "run", "-d", *label_args(run_id),
+        *env_args,
+        "-p", f"127.0.0.1::{record.container_port}",
+        record.image_ref,
+        *record.args,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        pytest.fail(f"`docker run` (S3 store) failed: {result.stderr}")
+    container_id = result.stdout.strip()
+    try:
+        host_port = _container_host_port(container_id, record.container_port)
+    except BaseException:
+        remove_store_container(container_id)
+        raise
+    return container_id, host_port, access_key, secret_key
+
+
+def _wait_for_store_health(host_port: int, container_id: str, health_path: str) -> None:
+    deadline = time.monotonic() + STORE_HEALTH_TIMEOUT_S
     last_err = "never attempted"
     while time.monotonic() < deadline:
         try:
-            resp = httpx.get(f"http://127.0.0.1:{host_port}/minio/health/live", timeout=2.0)
+            resp = httpx.get(f"http://127.0.0.1:{host_port}{health_path}", timeout=2.0)
             if resp.status_code == 200:
                 return
             last_err = f"status {resp.status_code}"
@@ -482,60 +518,43 @@ def _wait_for_minio_health(host_port: int, container_id: str) -> None:
             last_err = str(e)
         time.sleep(0.15)
     logs = subprocess.run(["docker", "logs", container_id], capture_output=True, text=True).stdout
-    pytest.fail(f"MinIO at 127.0.0.1:{host_port} (container {container_id}) did not answer GET /minio/health/live with 200 within {MINIO_HEALTH_TIMEOUT_S}s; last error: {last_err}; docker logs:\n{logs}")
+    pytest.fail(f"the S3 store at 127.0.0.1:{host_port} (container {container_id}) did not answer GET {health_path} with 200 within {STORE_HEALTH_TIMEOUT_S}s; last error: {last_err}; docker logs:\n{logs}")
 
 
 @pytest.fixture(scope="module")
-def minio_bucket() -> str:
-    """The bucket name `minio`/`tile_set` use -- its own fixture (not a bare module
+def store_bucket() -> str:
+    """The bucket name `s3_store`/`tile_set` use -- its own fixture (not a bare module
     constant) so a caller could override it, though nothing forces one to: each
-    `minio` fixture instance is a brand-new container every time (see this module's
+    `s3_store` fixture instance is a brand-new container every time (see this module's
     own doc, "How a second test module reuses this")."""
     return "av-tiles-heavy-stack-test"
 
 
 @pytest.fixture(scope="module")
-def minio(minio_bucket):
+def s3_store(store_bucket):
     if SKIP_REASON is not None:
         pytest.skip(SKIP_REASON)
-    image_ref, recorded_id = _parse_image_digest_md()
+    record = _store_record()
     run_id = f"{__name__}-{uuid.uuid4()}"
 
     with lock_docker_tests():
         prune_stale_labelled_resources()
 
-        access_key, secret_key = _random_creds(run_id)
-        cmd = [
-            "docker", "run", "-d", *label_args(run_id),
-            "-e", f"MINIO_ROOT_USER={access_key}",
-            "-e", f"MINIO_ROOT_PASSWORD={secret_key}",
-            "-p", "127.0.0.1::9000",
-            image_ref,
-            "server", "/data",
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if result.returncode != 0:
-            pytest.fail(f"`docker run` (MinIO) failed: {result.stderr}")
-        container_id = result.stdout.strip()
+        container_id, host_port, access_key, secret_key = start_store_container(record, run_id)
 
         try:
-            port_result = subprocess.run(["docker", "port", container_id, "9000/tcp"], capture_output=True, text=True, timeout=10)
-            if port_result.returncode != 0:
-                pytest.fail(f"`docker port {container_id} 9000/tcp` failed: {port_result.stderr}")
-            host_port = int(port_result.stdout.strip().rsplit(":", 1)[-1])
+            _wait_for_store_health(host_port, container_id, record.health_path)
 
-            _wait_for_minio_health(host_port, container_id)
+            actual_id = _local_image_id(record.image_ref)
+            assert actual_id == record.recorded_id, f"the RUNNING container's own image id {actual_id!r} must equal the recorded digest {record.recorded_id!r} (question 212(a)) -- got a mismatch after the module-level gate already passed"
 
-            actual_id = _local_image_id(image_ref)
-            assert actual_id == recorded_id, f"the RUNNING container's own image id {actual_id!r} must equal the recorded digest {recorded_id!r} (question 212(a)) -- got a mismatch after the module-level gate already passed"
-
-            yield SimpleNamespace(host_port=host_port, access_key=access_key, secret_key=secret_key, bucket=minio_bucket, container_id=container_id)
+            yield SimpleNamespace(host_port=host_port, access_key=access_key, secret_key=secret_key, bucket=store_bucket, container_id=container_id)
         finally:
-            subprocess.run(["docker", "rm", "-f", container_id], capture_output=True, timeout=30)
+            remove_store_container(container_id)
 
 
 # =================================================================================================
-# The small, real tile set -- module-scoped: run av-tile-fixture once against the real MinIO.
+# The small, real tile set -- module-scoped: run av-tile-fixture once against the real S3 store.
 # =================================================================================================
 
 
@@ -555,8 +574,8 @@ def tile_set_label() -> str:
 
 
 @pytest.fixture(scope="module")
-def tile_set(rust_bins, minio, key_prefix, tile_set_label):
-    """Runs `av-tile-fixture` for real against `minio` to build a small (a few tens of
+def tile_set(rust_bins, s3_store, key_prefix, tile_set_label):
+    """Runs `av-tile-fixture` for real against `s3_store` to build a small (a few tens of
     tiles) tile set labelled `tile_set_label`. Returns the fixture's own printed JSON,
     parsed, plus the store configuration every later fixture/test needs to read the
     SAME objects back out (through `av-tiles`, never directly)."""
@@ -570,11 +589,11 @@ def tile_set(rust_bins, minio, key_prefix, tile_set_label):
         "--max-level", "2",
         "--tile-size", "16",
         "--synthetic-source", "32x16",
-        "--store-endpoint", f"http://127.0.0.1:{minio.host_port}",
-        "--store-region", MINIO_REGION,
-        "--store-access-key-id", minio.access_key,
-        "--store-secret-access-key", minio.secret_key,
-        "--store-bucket", minio.bucket,
+        "--store-endpoint", f"http://127.0.0.1:{s3_store.host_port}",
+        "--store-region", STORE_REGION,
+        "--store-access-key-id", s3_store.access_key,
+        "--store-secret-access-key", s3_store.secret_key,
+        "--store-bucket", s3_store.bucket,
         "--store-path-style",
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
@@ -644,10 +663,10 @@ def _wait_for_listening_line(proc: subprocess.Popen, deadline_s: float) -> str:
 
 
 @pytest.fixture(scope="module")
-def av_tiles_service(rust_bins, minio, issuer, key_prefix, tile_set_label):
+def av_tiles_service(rust_bins, s3_store, issuer, key_prefix, tile_set_label):
     """Starts a real `av-tiles` subprocess on two OS-assigned ephemeral loopback ports
     (main + `--admin-bind`), configured with `issuer`, `LADDER`, a group-clearance map,
-    and `minio`.
+    and `s3_store`.
 
     Round 5, item B: `GET /admin/api/counters` now authenticates (question 229's open
     ruling -- see `crates/av-tiles/src/admin.rs`'s own module doc). `--admin-role
@@ -665,11 +684,11 @@ def av_tiles_service(rust_bins, minio, issuer, key_prefix, tile_set_label):
         "--oidc-public-key-path", str(issuer.public_key_path),
         "--ladder", LADDER,
         "--key-prefix", key_prefix,
-        "--store-endpoint", f"http://127.0.0.1:{minio.host_port}",
-        "--store-region", MINIO_REGION,
-        "--store-access-key-id", minio.access_key,
-        "--store-secret-access-key", minio.secret_key,
-        "--store-bucket", minio.bucket,
+        "--store-endpoint", f"http://127.0.0.1:{s3_store.host_port}",
+        "--store-region", STORE_REGION,
+        "--store-access-key-id", s3_store.access_key,
+        "--store-secret-access-key", s3_store.secret_key,
+        "--store-bucket", s3_store.bucket,
         "--store-path-style",
         "--group-clearance", f"tile-readers={tile_set_label}",
         "--group-clearance", "tile-guests=UNCLASSIFIED",
@@ -721,18 +740,18 @@ def admin_counter(av_tiles_service, code: str) -> int:
 # `av_tiles_service` above -- the real, unmodified `av-tiles:local` image (`services/tiles/
 # Dockerfile` + `services/tiles/build-image.sh` + `services/tiles/IMAGE_DIGEST.md`, the same
 # scripted, digest-recorded shape `services/edge-plugin/` already established), run as a
-# container rather than a host subprocess, reusing `rust_bins`/`minio`/`key_prefix`/
+# container rather than a host subprocess, reusing `rust_bins`/`s3_store`/`key_prefix`/
 # `tile_set_label`/`tile_set` exactly as `av_tiles_service` does -- only the gateway process
 # itself moves into a container. Extracted here (not into `tests/test_tiles_container.py`
 # alone) for the identical reason `av_tiles_service` itself lives here: a second consumer of
 # "the real stack, gateway included" should never have to duplicate this.
 #
-# Gated separately from `SKIP_REASON` above (which only ever concerns the MinIO image):
+# Gated separately from `SKIP_REASON` above (which only ever concerns the S3 store image):
 # `TILES_SKIP_REASON` additionally requires `av-tiles:local` to be present AND to match
 # `services/tiles/IMAGE_DIGEST.md`'s own recorded id (question 212(a): a test trusts an image
 # only after comparing it to its recorded digest -- unlike `tests/test_edge_plugin_container.
 # py`'s own `_compute_skip_reason`, which only checks presence by tag, this repeats the
-# stronger digest-compare discipline `_compute_skip_reason` above already applies to MinIO,
+# stronger digest-compare discipline `_compute_skip_reason` above already applies to the S3 store,
 # since a ':local' tag is exactly the kind of mutable reference a stale, un-rebuilt image can
 # hide behind).
 # =================================================================================================
@@ -823,10 +842,10 @@ def _container_host_port(container_id: str, container_port: int) -> int:
 
 
 @contextlib.contextmanager
-def tiles_gateway_container(rust_bins, minio, key_prefix, tile_set_label):
+def tiles_gateway_container(rust_bins, s3_store, key_prefix, tile_set_label):
     """Starts the REAL, unmodified `av-tiles:local` image as a container, on a dedicated,
-    labelled, user-defined bridge network shared with `minio` (connected to it by the network
-    alias `"minio"` -- Docker's own embedded per-network DNS, the identical mechanism
+    labelled, user-defined bridge network shared with `s3_store` (connected to it by the network
+    alias `"s3-store"` -- Docker's own embedded per-network DNS, the identical mechanism
     `tests/test_proposer_container.py` already relies on for its own Container P -> Container G
     name resolution), with its two ports (`--bind`/`--admin-bind`) published to the host so this
     context manager's callers can reach it exactly like `av_tiles_service` above.
@@ -838,7 +857,7 @@ def tiles_gateway_container(rust_bins, minio, key_prefix, tile_set_label):
     session-teardown hook) -- exactly `tests/test_edge_plugin_container.py::ResourceGuard`'s own
     shape (`guard.cleanup()` then `guard.assert_nothing_left()`, both inside one test), applied
     here as a context manager instead of a class since there is only ever one container to
-    track. `rust_bins`/`minio`/`key_prefix`/`tile_set_label` are still the SAME pytest fixtures
+    track. `rust_bins`/`s3_store`/`key_prefix`/`tile_set_label` are still the SAME pytest fixtures
     `av_tiles_service` depends on -- callers request them normally and pass the resolved values
     in.
 
@@ -869,15 +888,16 @@ def tiles_gateway_container(rust_bins, minio, key_prefix, tile_set_label):
     if TILES_PROVENANCE_FAILURE is not None:
         pytest.fail(TILES_PROVENANCE_FAILURE)
 
+    store_record = _store_record()
     run_id = f"tiles-container-{uuid.uuid4().hex[:12]}"
     scratch = TILES_CONTAINER_SCRATCH_ROOT / run_id
     scratch.mkdir(parents=True, exist_ok=True)
 
     with lock_docker_tests():
         # No prune here: `prune_stale_labelled_resources` removes EVERY resource carrying the
-        # test label, and the `minio` fixture this context manager depends on already pruned
+        # test label, and the `s3_store` fixture this context manager depends on already pruned
         # before creating its container, which carries that label. A second prune at this
-        # point killed the fixture's own live MinIO (`docker events`: kill, die 137, destroy,
+        # point killed the fixture's own live S3 store (`docker events`: kill, die 137, destroy,
         # one second after creation) and every `docker network connect` after it failed with
         # "No such container" -- the third distinct reason this test had never been seen
         # green (lead, 2026-09-21, question 232). Prune once, before the first creation.
@@ -890,11 +910,11 @@ def tiles_gateway_container(rust_bins, minio, key_prefix, tile_set_label):
 
         try:
             connect_result = subprocess.run(
-                ["docker", "network", "connect", "--alias", "minio", network_name, minio.container_id],
+                ["docker", "network", "connect", "--alias", "s3-store", network_name, s3_store.container_id],
                 capture_output=True, text=True, timeout=30,
             )
             if connect_result.returncode != 0:
-                pytest.fail(f"`docker network connect` (minio -> {network_name}) failed: {connect_result.stderr}")
+                pytest.fail(f"`docker network connect` (s3_store -> {network_name}) failed: {connect_result.stderr}")
 
             container_name = f"av-tiles-test-{run_id}"
             run_cmd = [
@@ -910,11 +930,11 @@ def tiles_gateway_container(rust_bins, minio, key_prefix, tile_set_label):
                 "--oidc-public-key-path", "/keys/oidc_pub.pem",
                 "--ladder", LADDER,
                 "--key-prefix", key_prefix,
-                "--store-endpoint", "http://minio:9000",
-                "--store-region", MINIO_REGION,
-                "--store-access-key-id", minio.access_key,
-                "--store-secret-access-key", minio.secret_key,
-                "--store-bucket", minio.bucket,
+                "--store-endpoint", f"http://s3-store:{store_record.container_port}",
+                "--store-region", STORE_REGION,
+                "--store-access-key-id", s3_store.access_key,
+                "--store-secret-access-key", s3_store.secret_key,
+                "--store-bucket", s3_store.bucket,
                 "--store-path-style",
                 "--group-clearance", f"tile-readers={tile_set_label}",
                 "--group-clearance", "tile-guests=UNCLASSIFIED",
@@ -936,7 +956,7 @@ def tiles_gateway_container(rust_bins, minio, key_prefix, tile_set_label):
             try:
                 _wait_for_container_listening_line(container_id, READY_TIMEOUT_S)
 
-                # Question 212(a), restated at the point of actual use (mirrors `minio`'s own
+                # Question 212(a), restated at the point of actual use (mirrors `s3_store`'s own
                 # identical re-check above): the RUNNING container's own image id must still
                 # equal the recorded digest, not just the tag that was resolved at gate time.
                 actual_id = _local_image_id(TILES_IMAGE_TAG)
@@ -955,7 +975,7 @@ def tiles_gateway_container(rust_bins, minio, key_prefix, tile_set_label):
                     issuer=issuer,
                 )
             finally:
-                subprocess.run(["docker", "rm", "-f", container_id], capture_output=True, timeout=30)
+                subprocess.run(["docker", "rm", "-f", "-v", container_id], capture_output=True, timeout=30)
         finally:
             subprocess.run(["docker", "network", "rm", network_name], capture_output=True, timeout=30)
             shutil.rmtree(scratch, ignore_errors=True)

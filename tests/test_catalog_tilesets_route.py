@@ -49,20 +49,21 @@ from fastapi.testclient import TestClient
 from altavista import gateway_client
 from altavista.container_hardening import label_args, prune_stale_labelled_resources
 from altavista.docker_test_lock import lock_docker_tests
+from altavista.store_record import fenced_block_after
 from altavista.pb import authority_pb2, authority_pb2_grpc, entity_pb2, envelope_pb2, heavy_pb2
 from altavista.server import create_app
 
 # Heavy round 6 (docs/heavy-plan.md's "A gap in the drive path that nobody had noticed"): the
 # REAL round-trip proof at the bottom of this file needs `heavy_stack`'s own module-level
-# docker/image-digest helpers and its `rust_bins`/MinIO machinery -- imported as a module (not
+# docker/image-digest helpers and its `rust_bins`/S3-store machinery -- imported as a module (not
 # only by fixture name) so this file can also reach its underscore-prefixed helpers
-# (`_fenced_block_after`, `_local_image_id`, `_docker_daemon_unavailable_reason`, `_random_
-# creds`, `_wait_for_minio_health`) rather than writing a FOURTH copy of "parse an IMAGE_
-# DIGEST.md fenced code block" (Rust already has two: `crates/av-catalog/tests/
-# catalog_postgis.rs`, `crates/av-gateway/tests/catalog_selector.rs`; Python already has one:
-# `tests/heavy_stack.py` itself) -- see `REAL_ROUND_TRIP_SKIP_REASON`'s own comment below for
-# exactly which pieces are reused and why reusing the FIXTURE objects themselves (`minio`,
-# `tile_set`) is not safe here (question 232).
+# (`_local_image_id`, `_docker_daemon_unavailable_reason`, `_store_record`, `start_store_
+# container`, `_wait_for_store_health`) and reads fenced blocks through `altavista.store_record.
+# fenced_block_after`, the one Python home for "parse an IMAGE_DIGEST.md fenced code block"
+# (Rust already has two: `crates/av-catalog/tests/catalog_postgis.rs`,
+# `crates/av-gateway/tests/catalog_selector.rs`) -- see `REAL_ROUND_TRIP_SKIP_REASON`'s own
+# comment below for exactly which pieces are reused and why reusing the FIXTURE objects
+# themselves (`s3_store`, `tile_set`) is not safe here (question 232).
 import heavy_stack  # noqa: E402 -- after the third-party imports above, matching this file's own existing import block
 from heavy_stack import rust_bins  # noqa: F401,E402 -- transitive fixture dependency (av-tile-fixture)
 
@@ -414,26 +415,27 @@ def test_a_real_gateway_refusal_is_never_flattened_to_a_generic_500(tmp_path, ga
 # against REAL binaries and a REAL PostgreSQL/PostGIS server, not merely that this file's own
 # Python adapter builds the right gRPC request.
 #
-# # Why this is NOT built out of `heavy_stack.minio`/`heavy_stack.tile_set`
+# # Why this is NOT built out of `heavy_stack.s3_store`/`heavy_stack.tile_set`
 #
-# `heavy_stack.minio` (module-scoped) takes `lock_docker_tests()` and calls `prune_stale_
+# `heavy_stack.s3_store` (module-scoped) takes `lock_docker_tests()` and calls `prune_stale_
 # labelled_resources()` once, at ITS OWN creation, then holds the lock for the rest of the
 # module's life (through every test's use, to its own teardown). A PostGIS container this file
 # also needs cannot be created by a SECOND, independently-scoped fixture that ALSO calls
-# `prune_stale_labelled_resources()` -- that second prune would run AFTER `minio`'s own
+# `prune_stale_labelled_resources()` -- that second prune would run AFTER `s3_store`'s own
 # container already exists and is daemon-wide (`altavista.container_hardening.
 # prune_stale_labelled_resources`'s own doc: "removes every container ... still carrying
 # `av.test`"), which is exactly question 232's defect ("this exact mistake killed the tile-
 # container test for a round"): a live container a fixture already depends on, swept by a
-# SECOND fixture's own prune. So `real_stack_containers` below creates BOTH the MinIO AND the
+# SECOND fixture's own prune. So `real_stack_containers` below creates BOTH the S3 store AND the
 # PostGIS container itself, under ONE `lock_docker_tests()` scope with exactly ONE `prune_
 # stale_labelled_resources()` call before either is created (question 156/232) -- reusing every
-# PURE helper function `heavy_stack` already has for the MinIO half (`_random_creds`, `_wait_
-# for_minio_health`, `_local_image_id`, `MINIO_REGION`) rather than a second, drifting copy of
+# PURE helper function `heavy_stack` already has for the S3-store half (`start_store_container`,
+# `_wait_for_store_health`, `remove_store_container`, `_local_image_id`, `STORE_REGION`) rather
+# than a second, drifting copy of
 # them, while owning its own single lock/prune scope end to end. The lock is held from before
 # the first `docker run` through the LAST assertion this file's own round-trip test makes
 # (question 207's own "take the lock for the whole round trip, never a second locking
-# mechanism") -- identical in shape to `heavy_stack.minio`'s own "one `with lock_docker_tests()`
+# mechanism") -- identical in shape to `heavy_stack.s3_store`'s own "one `with lock_docker_tests()`
 # wrapping creation, every test's use, AND teardown" pattern, just extended to two containers
 # instead of one.
 #
@@ -493,24 +495,24 @@ GATEWAY_READY_TIMEOUT_S = 180.0
 
 
 def _parse_catalog_image_digest_md() -> Tuple[str, str]:
-    """Mirrors `heavy_stack._parse_image_digest_md` exactly, restated for `services/catalog/
-    IMAGE_DIGEST.md` -- reuses that module's own generic `_fenced_block_after(text, marker)`
+    """Mirrors `heavy_stack._store_record`'s image/digest read, restated for `services/catalog/
+    IMAGE_DIGEST.md` -- reuses `altavista.store_record`'s generic `fenced_block_after(text, marker)`
     rather than a second copy of IT too."""
     text = CATALOG_IMAGE_DIGEST_MD.read_text()
-    image_ref = heavy_stack._fenced_block_after(text, "Registry reference")
-    recorded_id = heavy_stack._fenced_block_after(text, "docker image inspect")
+    image_ref = fenced_block_after(text, "Registry reference")
+    recorded_id = fenced_block_after(text, "docker image inspect")
     if not image_ref or not recorded_id:
         raise RuntimeError(f"could not find the 'Registry reference'/'docker image inspect' fenced code blocks in {CATALOG_IMAGE_DIGEST_MD}")
     return image_ref, recorded_id
 
 
 def _compute_real_round_trip_skip_reason() -> Optional[str]:
-    """`None` iff the docker daemon answers AND both images this round trip needs (MinIO,
+    """`None` iff the docker daemon answers AND both images this round trip needs (the S3 store,
     PostGIS) are present locally with an id matching their own recorded digest -- mirrors
     `heavy_stack._compute_skip_reason` (question 212(a)), extended to a SECOND image. Computed
     once at import time, the same convention `heavy_stack.SKIP_REASON` already uses."""
     if heavy_stack.SKIP_REASON is not None:
-        return heavy_stack.SKIP_REASON  # already covers the docker daemon + the MinIO image
+        return heavy_stack.SKIP_REASON  # already covers the docker daemon + the S3 store image
     try:
         image_ref, recorded_id = _parse_catalog_image_digest_md()
     except RuntimeError as e:
@@ -559,68 +561,59 @@ def _docker_port(container_id: str, container_port: str) -> int:
 
 @pytest.fixture(scope="module")
 def real_stack_containers():
-    """ONE `MinIO` container and ONE `PostGIS` container, under ONE `lock_docker_tests()` scope
+    """ONE S3-store container and ONE `PostGIS` container, under ONE `lock_docker_tests()` scope
     held from before either is created through this whole module's use of them to their own
     teardown -- see this section's own module-doc-adjacent comment above ("Why this is NOT
-    built out of `heavy_stack.minio`/`heavy_stack.tile_set`") for why this is not two
+    built out of `heavy_stack.s3_store`/`heavy_stack.tile_set`") for why this is not two
     independent, separately-locking fixtures."""
     if REAL_ROUND_TRIP_SKIP_REASON is not None:
         pytest.skip(REAL_ROUND_TRIP_SKIP_REASON)
 
-    minio_image_ref, minio_recorded_id = heavy_stack._parse_image_digest_md()
+    store_record = heavy_stack._store_record()
     catalog_image_ref, catalog_recorded_id = _parse_catalog_image_digest_md()
     run_id = f"catalog-round-trip-{uuid.uuid4()}"
 
     with lock_docker_tests():
         prune_stale_labelled_resources()  # ONCE, before creating anything (question 156/232)
 
-        # -- MinIO --------------------------------------------------------------------------
-        access_key, secret_key = heavy_stack._random_creds(run_id)
-        minio_cmd = [
-            "docker", "run", "-d", *label_args(run_id),
-            "-e", f"MINIO_ROOT_USER={access_key}",
-            "-e", f"MINIO_ROOT_PASSWORD={secret_key}",
-            "-p", "127.0.0.1::9000",
-            minio_image_ref,
-            "server", "/data",
-        ]
-        result = subprocess.run(minio_cmd, capture_output=True, text=True, timeout=30)
-        if result.returncode != 0:
-            pytest.fail(f"`docker run` (MinIO) failed: {result.stderr}")
-        minio_container_id = result.stdout.strip()
-        minio_host_port = _docker_port(minio_container_id, "9000/tcp")
-        heavy_stack._wait_for_minio_health(minio_host_port, minio_container_id)
-        actual_minio_id = heavy_stack._local_image_id(minio_image_ref)
-        assert actual_minio_id == minio_recorded_id, f"the RUNNING MinIO container's own image id {actual_minio_id!r} must equal the recorded digest {minio_recorded_id!r}"
-
-        # -- PostGIS -- mirrors crates/av-catalog/tests/catalog_postgis.rs::start_fixture and
-        # services/catalog/run-dev-catalog.sh's own POSTGRES_PASSWORD/POSTGRES_DB shape -------
-        sanitized_run_id = "".join(c for c in run_id if c.isalnum())
-        pg_password = f"avtestpw{sanitized_run_id}"
-        pg_database = f"avtestdb{sanitized_run_id}"
-        pg_cmd = [
-            "docker", "run", "-d", *label_args(run_id),
-            "-e", f"POSTGRES_PASSWORD={pg_password}",
-            "-e", f"POSTGRES_DB={pg_database}",
-            "-p", "127.0.0.1::5432",
-            catalog_image_ref,
-        ]
-        result = subprocess.run(pg_cmd, capture_output=True, text=True, timeout=30)
-        if result.returncode != 0:
-            pytest.fail(f"`docker run` (PostGIS) failed: {result.stderr}")
-        pg_container_id = result.stdout.strip()
-        pg_host_port = _docker_port(pg_container_id, "5432/tcp")
-        actual_pg_id = heavy_stack._local_image_id(catalog_image_ref)
-        assert actual_pg_id == catalog_recorded_id, f"the RUNNING PostGIS container's own image id {actual_pg_id!r} must equal the recorded digest {catalog_recorded_id!r}"
-
+        # -- S3 store: started exactly as services/store/IMAGE_DIGEST.md's launch record says -----
+        store_container_id, store_host_port, access_key, secret_key = heavy_stack.start_store_container(store_record, run_id)
+        pg_container_id = None
         try:
+            heavy_stack._wait_for_store_health(store_host_port, store_container_id, store_record.health_path)
+            actual_store_id = heavy_stack._local_image_id(store_record.image_ref)
+            assert actual_store_id == store_record.recorded_id, f"the RUNNING S3-store container's own image id {actual_store_id!r} must equal the recorded digest {store_record.recorded_id!r}"
+
+            # -- PostGIS -- mirrors crates/av-catalog/tests/catalog_postgis.rs::start_fixture and
+            # services/catalog/run-dev-catalog.sh's own POSTGRES_PASSWORD/POSTGRES_DB shape -------
+            sanitized_run_id = "".join(c for c in run_id if c.isalnum())
+            pg_password = f"avtestpw{sanitized_run_id}"
+            pg_database = f"avtestdb{sanitized_run_id}"
+            pg_cmd = [
+                "docker", "run", "-d", *label_args(run_id),
+                "-e", f"POSTGRES_PASSWORD={pg_password}",
+                "-e", f"POSTGRES_DB={pg_database}",
+                "-p", "127.0.0.1::5432",
+                catalog_image_ref,
+            ]
+            result = subprocess.run(pg_cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                pytest.fail(f"`docker run` (PostGIS) failed: {result.stderr}")
+            pg_container_id = result.stdout.strip()
+            pg_host_port = _docker_port(pg_container_id, "5432/tcp")
+            actual_pg_id = heavy_stack._local_image_id(catalog_image_ref)
+            assert actual_pg_id == catalog_recorded_id, f"the RUNNING PostGIS container's own image id {actual_pg_id!r} must equal the recorded digest {catalog_recorded_id!r}"
+
             yield SimpleNamespace(
-                minio=SimpleNamespace(host_port=minio_host_port, access_key=access_key, secret_key=secret_key, bucket="av-catalog-round-trip-test", container_id=minio_container_id),
+                s3_store=SimpleNamespace(host_port=store_host_port, access_key=access_key, secret_key=secret_key, bucket="av-catalog-round-trip-test", container_id=store_container_id),
                 postgis=SimpleNamespace(host_port=pg_host_port, user="postgres", password=pg_password, database=pg_database, container_id=pg_container_id),
             )
         finally:
-            subprocess.run(["docker", "rm", "-f", minio_container_id], capture_output=True, timeout=30)
-            subprocess.run(["docker", "rm", "-f", pg_container_id], capture_output=True, timeout=30)
+            # `rm -f -v` for both: the S3-store image and the PostGIS image each declare a VOLUME,
+            # and a plain `rm -f` leaves an anonymous volume behind per run (question 249).
+            heavy_stack.remove_store_container(store_container_id)
+            if pg_container_id is not None:
+                subprocess.run(["docker", "rm", "-f", "-v", pg_container_id], capture_output=True, timeout=30)
 
 
 def _run_migrate(migrate_bin: Path, postgis: SimpleNamespace, *, applied_tai_ns: Optional[int] = None, timeout: float = 30.0) -> subprocess.CompletedProcess:
@@ -726,11 +719,11 @@ def _run_tile_fixture_with_catalog(rust_bins_ns, containers: SimpleNamespace, *,
         "--max-level", "2",
         "--tile-size", "16",
         "--synthetic-source", "32x16",
-        "--store-endpoint", f"http://127.0.0.1:{containers.minio.host_port}",
-        "--store-region", heavy_stack.MINIO_REGION,
-        "--store-access-key-id", containers.minio.access_key,
-        "--store-secret-access-key", containers.minio.secret_key,
-        "--store-bucket", containers.minio.bucket,
+        "--store-endpoint", f"http://127.0.0.1:{containers.s3_store.host_port}",
+        "--store-region", heavy_stack.STORE_REGION,
+        "--store-access-key-id", containers.s3_store.access_key,
+        "--store-secret-access-key", containers.s3_store.secret_key,
+        "--store-bucket", containers.s3_store.bucket,
         "--store-path-style",
         "--catalog-host", "127.0.0.1",
         "--catalog-port", str(containers.postgis.host_port),
