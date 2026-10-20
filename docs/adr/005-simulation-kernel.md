@@ -237,6 +237,44 @@ the per-instance physical dimension explicitly (the STM-augmented state does not
 and `BoxedModel` remains `!Send` like every GMAT-backed model, so parallelism stays by
 process.
 
+## Amendment 2026-10-19: which reproducibility claims hold across platforms (question 258)
+
+Sections 2, 5 and 7 promise that a run is a pure function of its ordered inputs, and that the
+same DRM produces the same realization "on every run and on every host". Every output carries
+its hashes, and question 175 adds the port-traffic hash. Question 248 measured where this held:
+
+- on one build target and one libm, byte for byte;
+- not across macOS and Linux, because Apple's libm and glibc return different last bits for
+  `sin`, `cos`, `acos`, `asin`, `atan2`, `hypot`, `exp` and `powf`.
+
+Question 258 settles it per kind of run:
+
+- **Native runs are byte-identical across platforms.** A native run uses only `av-orbital`,
+  `av-dynamics` and `av-kernel` models, with no `gmat.` model and no container, Renode or board
+  binding. Every transcendental function on that path goes through `av_dynamics::math`, the
+  pure-Rust `libm` crate. `sqrt` and `powi` stay on `std`: `sqrt` is correctly rounded by IEEE
+  754, and `powi` is the same compiler-builtins code on every target. A clippy
+  `disallowed-methods` guard keeps the platform functions off the native path. Measured:
+  - the 12-sample study `drms/leo_orbital_native_sweep.*` has the same 14 hashes on macOS
+    arm64, Linux aarch64 and Linux x86_64: `sweep_results.pb`, `sweep_results.json` and all
+    twelve `RunProducts`;
+  - the native attitude and sensor runs give the same `RunProducts` and the same port-traffic
+    sidecar (the logged traffic and its hash, question 175) on all three.
+
+  For a native run, the run hash, the scores and the port-traffic hash recorded on one of these
+  platforms are expected on the others.
+- **GMAT-backed runs stay per-platform.** GMAT evaluates its own models with the platform's
+  libm inside `libGmatBase`. So does every C or C++ binary inside a container, Renode or board
+  binding: the cFS apps, the shim, the board firmware. Their bytes reproduce on the same build
+  target and libm (question 248) and are not claimed across platforms. A run that mixes native
+  and GMAT-backed instances carries the weaker, per-platform claim.
+- **Replay is unaffected.** It never re-runs a model. It verifies the logged hashes and plays the
+  log back, so a replay checks the same bytes on any host. A fresh run reproduces a recorded run
+  across platforms only in the native case above.
+- **Integration limits.** Platform independence does not make a run independent of
+  configuration. The integrator's tolerances, the model versions and the data-pack hashes are
+  still inputs, and still in `Provenance`.
+
 ## References
 
 - `crates/av-kernel` (clock, scheduler, DRM executor, question 87), `crates/av-dynamics`

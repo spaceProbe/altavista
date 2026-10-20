@@ -2113,3 +2113,156 @@ macOS and glibc outputs byte for byte.
 5. The three-platform proof needs a `linux/amd64` image. None is on this host (`rust@3914072c…` and
    `debian:bookworm-slim@88200866…` are arm64 only here). It needs one fetch by digest of
    `rust:1.90-bookworm` for linux/amd64.
+
+### Phase 2: adopted (after the lead's go; Phase 1 decisions 1–5 ratified)
+
+**Commits** (identity `Austin Probe`, no trailers):
+- `231c84f`: the `libm` backend. The body lists every moved residual with old value, new value and
+  share of tolerance.
+- `48899e7`: the guard.
+- `df331c0`: the re-recorded residuals and the FK5 pin.
+- `0419810`: `k8s_sweep.rs` asserts that the native study equals the image's.
+- `b42d22b`: develop (`b44ecf9`, the S3 round, including `docker rm -v` in `ManagedContainer`) merged
+  with a merge commit.
+- This section and the docs commit.
+
+**The `libm` backend.** It is the held Phase 1 patch: twelve one-line bodies and the `libm =
+"0.2.16"` dependency of `av-dynamics`. The smallest margin of any native golden is SRP golden B's
+velocity, 3.589293e-6 m/s, which is 89.7% of its 4e-6 m/s tolerance.
+
+**Re-pinned and re-recorded** (ruling 2):
+- `fk5_vs_convert.rs`'s `MEASURED_MAX_ANGLE_RAD` moved from 1.5193960324222241e-9 to
+  1.5193960323497342e-9. The tolerance stays 3 × the measured value. `MEASURED_MAX_R_DOT_DIFF` did
+  not move.
+- Dated re-measurement lines, old and new values, were added:
+  - in the doc comments of `gravity_goldens.rs` (golden A and golden B), `thirdbody_goldens.rs`,
+    `drag_srp_m5.rs`, `orbital_vs_gmat_score.rs` ("1.2e-5 m" now reads 1.35e-5 m) and
+    `model.rs`'s symplectic check (5.872545e-9 → 5.863366e-9);
+  - in eight rows of `goldens/README.md`, under a dated note.
+- No GMAT golden was regenerated. No dated `reason` sentence was edited: they record when each
+  tolerance was set, and they are still true of the build they name. The Goldens tables of rounds
+  1–3 above are history too. The current values are Phase 1's table in this section.
+
+**Frozen run fixtures** (ruling 3). `tests/fixtures/*.runproducts.bin` predate question 258 and are
+not expected to reproduce. Consumers decode them as frozen inputs and never compare them with a
+fresh run. Even before the `libm` change, `demo_attitude_control` and `demo_measurements` did not
+reproduce at `4aafdd3`: a fresh run differs in 12,787 and 17 decoded lines. After the change their
+last-ulp values and `port_traffic_hash` would move as well.
+
+**The guard** (ruling 4) is clippy `disallowed-methods`:
+- Each of `crates/av-dynamics`, `crates/av-orbital` and `crates/av-kernel` carries the same
+  `clippy.toml`. It lists the `f64` methods `sin`, `cos`, `sin_cos`, `tan`, `asin`, `acos`, `atan`,
+  `atan2`, `sinh`, `cosh`, `tanh`, their inverses, `exp`, `exp2`, `exp_m1`, `ln`, `ln_1p`, `log`,
+  `log10`, `log2`, `powf`, `hypot` and `cbrt`, and the `f32` counterparts of the ones in use. `sqrt`
+  and `powi` are deliberately absent.
+- **How test code is exempted.** Clippy reads `clippy.toml` per package and applies it to every
+  target of the package: the library, its `#[cfg(test)]` modules, `tests/*.rs` and examples.
+  Scoping by crate alone therefore cannot exempt test code. Resolved with two lint levels:
+  - each package's `Cargo.toml` sets `[lints.clippy] disallowed_methods = "allow"`;
+  - the native path re-denies it with `#![cfg_attr(not(test), deny(clippy::disallowed_methods))]`
+    (the crate roots of `av-dynamics` and `av-orbital`) or `#[cfg_attr(not(test), deny(...))]`
+    (`av-kernel`'s `pub mod drm`, `pub mod rng` and `pub mod interpolate`, the ruled scope).
+  - The non-test library build lints every non-test line under `deny`. The test build has
+    `cfg(test)`, so it stays at `allow`. Integration tests and examples are separate crates of the
+    package and get only the package-level `allow`.
+- `av_dynamics::math` needs no exemption, because it calls `libm`, never an `f64` method.
+- **Proof, in a separate clone** (`/Users/probe/native-libm-stage/bench-libm`; the worktree was
+  never perturbed). `cargo clippy --workspace --all-targets --keep-going -- -D warnings` was run
+  over planted calls:
+  - `use of a disallowed method f64::powf` at `av-dynamics/src/integrate.rs`;
+  - `f64::sin` at `av-orbital/src/fk5.rs` (exit 101);
+  - `f64::cos`, written as `f64::cos(x)`, at `av-kernel/src/drm/ground.rs`;
+  - not flagged: a planted `0.5_f64.sin()` inside a `#[cfg(test)]` module of `fk5.rs` (the crate
+    and its test target then compiled clean), and an `x.exp()` in `av-kernel/src/kernel.rs`, which is
+    outside the ruled scope.
+  - The clone was discarded. At the real head the same command exits 0.
+- `av-kernel`'s other modules (`kernel.rs`, `schedule.rs`, `expr`, …) are outside the guard by the
+  ruling. Today they have no non-test transcendental call.
+
+**`k8s_sweep.rs`** (ruling 6):
+- `AV_SWEEP_REQUIRE_NATIVE_EQUAL` is gone. k8s == native and container == native are asserted.
+  Their failure message names a stale `av-sweep-sample:local` as the likely cause, and the
+  rebuild-and-re-record steps.
+- The image was not rebuilt here (its build fetches with apt). Until the lead rebuilds it, this
+  test fails by design.
+
+**The `linux/amd64` image** (ruling 5):
+- Pulled once, under the docker lock, by the pinned index digest:
+  `docker pull --platform linux/amd64 rust:1.90-bookworm@sha256:3914072c…`.
+- Before and after, `docker image inspect` of the digest gives Id `sha256:3914072c…`, arm64.
+- After the pull, the per-platform manifests resolve:
+  - arm64: `sha256:4c632e49…`;
+  - amd64: `sha256:3f6e6f8d…`.
+- Colima's VM already had `qemu-x86_64` registered in binfmt_misc (flags `POCF`). The VM was not
+  changed.
+- The amd64 build ran under emulation, offline (`--network none`, vendored crates, the protoc
+  replay). Four attempts:
+  1. The first warm build died: `cc` was killed by SIGSEGV while linking `async-trait`.
+  2. The identical retry succeeded.
+  3. The final-head build after the develop merge hung, and the lead stopped it by container ID
+     after 71 min. It had been holding the docker lock the lead's merge gate was waiting on, an
+     error on my part: an emulated compile needs no docker lock. Its state, as the lead recorded
+     it from `docker top`:
+     - two `qemu-x86_64 cargo` processes, the second a child of the first, both in
+       `futex_wait_queue`;
+     - 0 to 2 s of CPU, and no `rustc` alive.
+  4. The identical incremental build, re-run without the lock under a sampler
+     (`linux-build-watched.sh`, every 30 s: state, wait channel, CPU time, threads and command
+     line of every process), finished in 1 min 34 s. Its samples show the normal shape, a cargo
+     with 5 threads and two `rustc` children compiling.
+- **Root cause, as far as the evidence reaches: fork without exec under qemu-user.**
+  - Cargo is multithreaded, and starts every `rustc` by fork then exec. A child stuck between the
+    two still carries cargo's command line and one thread, which is exactly the "second cargo" the
+    lead saw.
+  - qemu-user emulates a guest `fork` while other guest threads run. A host lock held by one of
+    them at that moment is inherited locked by the child, which then waits on its futex forever.
+    This is a known class of qemu-user deadlock.
+  - The SIGSEGV of attempt 1 is the same class of emulation fault, in a forked linker.
+  - Both are intermittent: 2 of 4 attempts. The hang did not reproduce on the identical retry, so
+    I could not test whether `-j1`, `CARGO_BUILD_JOBS=1` or a `net` setting avoids it. `-j1`
+    would not remove it in any case, because cargo keeps helper threads at `-j1` and rustc forks
+    its linker.
+  - The robust fix is the lead's alternative: cross-compile on arm64 and keep emulation for
+    running only. It is recorded below as an open item.
+- The proof binaries are attempt 4's: built at the final head, offline.
+
+**The three-platform proof** (item 7). Every binary is a release `--no-default-features` build at
+the final head:
+- macOS arm64: built natively, on this host.
+- Linux aarch64: built inside `rust@3914072c…` on Colima, offline.
+- Linux x86_64: built and run in the emulated `linux/amd64` platform of the same index digest,
+  offline.
+
+Each platform ran:
+- the question-248 study, `drms/leo_orbital_native_sweep.*`, 12 samples with `--workers 4`;
+- the two native closed-loop runs with port traffic, `demo_attitude_control` (6,006 events) and
+  `demo_measurements`, by the commands `tests/test_cdm_run.py` records.
+
+All runs used identical paths and the four staged GMAT data files. Full SHA-256 sums are in the
+round's `scratch/phase2-evidence/`.
+
+| File | macOS arm64 | Linux aarch64 | Linux x86_64 | macOS, `4aafdd3` | Linux aarch64, `4aafdd3` |
+|---|---|---|---|---|---|
+| `sweep_results.pb` | `0629601cc212…` | equal | equal | `1aef95bec15d…` | `98e66a491b1b…` |
+| `sweep_results.json` | `318e07a0082b…` | equal | equal | `58f2ac996e5a…` | `70d261209067…` |
+| 12 × `sample_*/run_products.pb` (`p0_d0` `a29d1677a409…` … `p3_d2` `9e3073925534…`) | | 12 equal | 12 equal | 12 differ | 12 differ |
+| `demo_attitude_control` `RunProducts` | `03fe14ed5c42…` | equal | equal | | |
+| `demo_attitude_control` port traffic | `7d71e3d2ba22…` | equal | equal | | |
+| `demo_measurements` `RunProducts` | `5e134df7b170…` | equal | equal | | |
+| `demo_measurements` port traffic | `d21dc0dba2a6…` | equal | equal | | |
+
+- **The 14-hash comparison is 14 of 14 equal on all three platforms**, against 0 of 14 for the
+  platform libm at `4aafdd3`.
+- **The four port-traffic proof files are 4 of 4 equal.** The `RunProducts` include the
+  `port_traffic_hash` and the sidecar's path.
+- **Reproducibility claims after this round** (ADR-005's amendment of 2026-10-19):
+  - native runs are byte-identical across macOS arm64, Linux aarch64 and Linux x86_64;
+  - GMAT-backed runs, and the C code in containers and boards, stay per-platform;
+  - replay verifies logged bytes and is unaffected.
+
+**What stays open:**
+- `av-sweep-sample:local` must be rebuilt (the lead, at the merge) before `k8s_sweep.rs`'s new
+  assertion can pass.
+- A cross-compiled amd64 build would retire the emulated compile and its intermittent qemu-user
+  faults. It is not built here, because the emulated build succeeded for the proof.
+- The SBOMs that move with the lockfile are the lead's to regenerate.

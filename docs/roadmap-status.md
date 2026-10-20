@@ -22,7 +22,7 @@ recipe is in `README.md`.
 ## Open items and risks
 
 - **Hardware in the loop:** deferred by the user (question 245). When resumed: the 2024.2 ZCU104 BSP from the user for the real `BOOT.BIN` (question 243), then the board day (question 244).
-- **Reproducibility across platforms (questions 248, 258):** run bytes reproduce on the same build target and libm, not across macOS and Linux; the user chose a portable maths implementation for native runs, measured first (question 258, native round after question 257). GMAT-backed runs stay per-platform.
+- **Reproducibility across platforms (questions 248, 258):** native runs are byte-identical on macOS arm64, Linux aarch64 and Linux x86_64 since question 258. Their transcendentals go through `av_dynamics::math` (the pure-Rust `libm` crate), held there by a clippy guard. GMAT-backed runs, and the C code inside containers and boards, stay per-platform (ADR-005's 2026-10-19 amendment). The sweep sample image must be rebuilt after that change for `k8s_sweep.rs`'s native-equals-image assertion.
 - **MinIO (questions 255, 256):** its pinned image can no longer be fetched; the heavy team is trialling SeaweedFS and Versity Gateway (Apache-2.0) to replace it.
 - **The kit (questions 251, 255):** GMAT is pinned for macOS arm64 (this host's install) and Linux x86_64 (NASA's Ubuntu archive); NASA publishes no Linux aarch64 build; the RHEL 7 archive is being pinned as a second variant (question 257).
 - **`serde_yaml` (questions 246, 251):** gone from AltaVista's crates; the `RUSTSEC-2024-0449` ignore stays for spoore's `spoore-tree` until the user merges the lead's spoore branch (question 259). MSRV 1.89, measured.
