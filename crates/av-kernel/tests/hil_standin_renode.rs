@@ -13,7 +13,8 @@
 //! The run: 10 s at 10 Hz (100 scheduler ticks), twice, each against a freshly booted guest:
 //!
 //! - **(a) no faults.** The decoded port-traffic records are compared with the lockstep reference,
-//!   the records-only hash `8e518964...8fd2` of `drm_attitude_control_renode.rs` (the full value is
+//!   the records-only hash `0532f8ff...c50b` (since question 258; `8e518964...8fd2` before) of
+//!   `drm_attitude_control_renode.rs` (the full value is
 //!   recorded in the round's gate logs, not in the repository, which abbreviates it: the constant
 //!   below is that value, printed by that test as `port traffic records-only hash: posix=... renode=...`).
 //!   Real time against lockstep is exactly the question; the test prints where the records differ if
@@ -104,7 +105,15 @@ const ELF_SHA256: &str = "de96907ff95fc8854723fbc71cd0c084483332c08984b60ec22ef9
 const ELF_SHA256_ENV: &str = "AV_HIL_STANDIN_ELF_SHA256";
 /// The lockstep reference: the records-only hash of the 998 decoded port-traffic records of the
 /// posix container and of the Renode lockstep run (`drm_attitude_control_renode.rs`), 10 s at 10 Hz.
-const LOCKSTEP_RECORDS_ONLY_HASH: &str = "8e518964f6253559d3ac23868ffdeba43fb3dde67c6af2ccfd94c425c4948fd2";
+///
+/// Re-pinned 2026-10-19 (question 258): `8e518964f6253559d3ac23868ffdeba43fb3dde67c6af2ccfd94c425c4948fd2`
+/// became `0532f8ff00c3a7022d3afc4833068ae5a99abe48930241e6788aac718d04c50b` when the native attitude
+/// and sensor models' transcendentals moved onto the `libm` crate. The models' last-ulp outputs are
+/// in the records the controller receives. Measured: with the platform libm (the routed, bit-neutral
+/// tree), `drm_attitude_control_renode.rs` gives `8e518964…` on both sides; with `libm`, it gives
+/// `0532f8ff…` on both sides, and this test's real-time run gives `0532f8ff…` too. The record
+/// count (998) and the truth pointing error at t = 10 s (1.823926917407e-1 rad) did not move.
+const LOCKSTEP_RECORDS_ONLY_HASH: &str = "0532f8ff00c3a7022d3afc4833068ae5a99abe48930241e6788aac718d04c50b";
 const LOCKSTEP_RECORD_COUNT: usize = 998;
 
 const EDGE_NODE: &str = "standin-renode";

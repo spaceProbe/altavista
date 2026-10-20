@@ -45,7 +45,9 @@
 //! the Renode sidecar `port_traffic.pb` is byte-identical between the two runs (SHA-256
 //! `8a16007f...7fff` both, 83694 bytes, 998 records), the records-only hash is
 //! `8e518964...8fd2` in all four sidecars, and the truth pointing error at t = 10 s is
-//! 1.823926917407e-1 rad in all four. (The *posix* whole-file hash differs between those two
+//! 1.823926917407e-1 rad in all four. (Since question 258, 2026-10-19, the native models evaluate
+//! their transcendentals with the `libm` crate, and the records-only hash is `0532f8ff...c50b` on
+//! both sides. The pointing error and the 998 records are unchanged.) (The *posix* whole-file hash differs between those two
 //! runs, `a514ea92...` against `36329922...`, and that is the sidecar's own
 //! `sos_configuration_hash`: the posix `SosConfiguration` embedded the throwaway registry's
 //! ephemeral port in `ContainerBinding.image`; nothing about the traffic. Since question 239 the

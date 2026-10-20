@@ -2139,6 +2139,20 @@ velocity, 3.589293e-6 m/s, which is 89.7% of its 4e-6 m/s tolerance.
     `drag_srp_m5.rs`, `orbital_vs_gmat_score.rs` ("1.2e-5 m" now reads 1.35e-5 m) and
     `model.rs`'s symplectic check (5.872545e-9 → 5.863366e-9);
   - in eight rows of `goldens/README.md`, under a dated note.
+- **A recorded hash Phase 1 missed, found by the Phase 2 gate:**
+  - `hil_standin_renode.rs`'s `LOCKSTEP_RECORDS_ONLY_HASH`, the records-only hash of the 998
+    port-traffic records of the attitude closed loop through the cFS ELF in Renode, moved from
+    `8e518964…8fd2` to `0532f8ff…c50b`.
+  - Phase 1's "no test fails" was true of the default suite only. This test and the Renode test it
+    references are opt-in (`AV_RENODE_TESTS=1 AV_HIL_STANDIN_TESTS=1`), and both were among the
+    SKIPPED lines.
+  - **Root cause, by measurement:** `drm_attitude_control_renode.rs` gives `8e518964…` on both
+    sides with the platform libm (the bit-neutral routed tree, run in a clone), and `0532f8ff…` on
+    both sides with `libm`. The stand-in's real-time run also gives `0532f8ff…`. So the native
+    models' last ulps reach the controller's records.
+  - **Unchanged:** the 998 records, and the truth pointing error at t = 10 s (1.823926917407e-1
+    rad).
+  - Re-pinned with both values in the constant's doc comment.
 - No GMAT golden was regenerated. No dated `reason` sentence was edited: they record when each
   tolerance was set, and they are still true of the build they name. The Goldens tables of rounds
   1–3 above are history too. The current values are Phase 1's table in this section.
