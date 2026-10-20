@@ -4122,3 +4122,267 @@ moved.
 
 - The lead's browser drive above, which closes the round, including a real-GPU frame time.
 - The "Found, not fixed" items, each for the lead to schedule.
+
+## Status (heavy manager, 2026-10-19) — the S3 server round (question 256)
+
+This round does not reopen the plan. It replaces MinIO, whose pinned image can no longer be
+fetched (question 255), with an Apache-2.0 S3-compatible server chosen by trial (question 256,
+amending question 39). The trial was between SeaweedFS and Versity Gateway. `## Delivered` stands.
+No proto moved. `av-store`'s behaviour did not move: its sources changed in comments only. The 30
+tests that skipped for MinIO (24 Python, 6 Rust) now run, and no MinIO skip is left. All 30 passed
+against Versity Gateway in the trial. At the final gate 29 pass, and `test_tiles_container.py` fails
+only because the tiles image is stale by commit (see Gates).
+
+The lead's rulings are named by set: A for the rulings that followed tasks 1 and 2 (A2: a store
+backend error is not a 404; A3: no change to `av-store`'s metadata format without the lead; A4:
+stale references), B for those that followed tasks 3 to 5 (B1: Versity and operator-supplied
+accepted, the application layer open; B2: the prune removes volumes; B3: the remaining
+comments; B4: merge `develop`).
+
+### What landed, one commit per accepted task
+
+| Commit | What |
+| --- | --- |
+| `8be5595` | Task 1, and the chosen record. `services/store/IMAGE_DIGEST.md` pins Versity Gateway and records how to start it, with MinIO kept as history. The launch-record parser is in `av_lockstep::docker`. `ManagedContainer` removes with `rm -v`. `minio_store.rs` becomes `s3_store.rs`, record-driven, with tests for a wrong secret, an unknown key, clock skew and repeat bucket creation, plus stronger HEAD checks. `store_tiler.rs` is record-driven. |
+| `56f5977` | Task 2: `altavista/store_record.py` and its tests. `heavy_stack.py` gets a store-start helper and `rm -f -v`, and the fixtures are renamed. Every store-dependent Python test is re-pointed. |
+| `a1b7ef4` | Task 3 (the lead's ruling A2): `av-tiles` answers 502 `tiles_store_backend_error` for a store backend error instead of a masked 404. It adds core tests, a real-server test, and the default-provenance round trip in `s3_store.rs`. |
+| `1d06878` | Task 4: `run-dev-store.sh` and `ten_gigabyte_proof.py` start the recorded server. Stale `minio_store.rs` references in comments and docs are cleaned (the lead's ruling A4). |
+| `2a0695d` | Task 5: the kit's item 5 is `versitygw`, operator-supplied. The pins-vs-record test reads the record's current reference, not its History section. |
+| `adfb9c7` | Merge of `develop` at `4aafdd3` (question 257's kit changes, and the question 258–260 docs). No conflicts. |
+| `b3cfbc7` | Task 6 (the lead's ruling B2): the label prune removes a stale container's anonymous volumes (`rm -f -v`), with a docker-gated test. |
+| `d5b3fa0` | Task 7 (the lead's ruling B3): comments that described MinIO as the current store. |
+| this commit | this status section |
+
+### The candidates, each pulled once by digest (question 154)
+
+| | SeaweedFS | Versity Gateway |
+| --- | --- | --- |
+| Release, tag the digest carried | 4.48, `chrislusf/seaweedfs:4.48` | v1.9.0, `versity/versitygw:v1.9.0` |
+| Pinned reference (OCI index; the Id on this containerd store) | `chrislusf/seaweedfs@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d` | `versity/versitygw@sha256:eb7f786fcd91e72194e48fcf1ac16302d686bf8e3a71434bdbc067a6efd3fdc7` |
+| arm64 / amd64 manifests | `f1f30347…` / `aba492e2…` | `f9768331…` / `57b45f18…` |
+| Source, revision | github.com/seaweedfs/seaweedfs, `530be3e3…` | github.com/versity/versitygw, `ca4c8d30…` |
+| Licence, from the project | Apache-2.0 (`LICENSE` at the tag, sha256 `d789d433…`; image label) | Apache-2.0 (`LICENSE` at the tag, sha256 `c71d239d…`; image label) |
+| Image | 184 MB; Alpine base; `VOLUME /data` | 33 MB; Alpine 3.24.2 base; no volume |
+| Server binary | `weed`, static Go, 205 MB, 252 modules | `versitygw`, static Go, 64 MB, 76 modules, built `v1.9.0+dirty` upstream |
+| How it ran | `weed mini` (master, volume, filer, S3 and admin in one process), `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, `-master.telemetry=false` (the default reports to telemetry.seaweedfs.com), admin UI, WebDAV, Iceberg and Lance off; health `GET /healthz` | `ROOT_ACCESS_KEY_ID`/`ROOT_SECRET_ACCESS_KEY`, `--health /health posix /tmp/vgw` (single-account mode; metadata in extended attributes) |
+
+The configuration is the launch record in `services/store/IMAGE_DIGEST.md`. Every test reads it
+(decision 2). Credentials are generated per run, and the port is published on loopback only.
+
+### The trial tables
+
+`av-store` uses four S3 operations: CreateBucket, PutObject with `x-amz-meta-av-*`, GetObject and
+HeadObject. Every request is SigV4-signed in the `Authorization` header over the real payload hash.
+It uses no conditional requests, no Range requests, no multipart and no listing. `av-tiles` serves
+`Range` and `If-None-Match` itself, from whole objects it has fetched and verified. Those S3
+features were therefore not exercised, and the drop-in claim covers only the four operations.
+
+**Rust, `av-store` and `av-jobs` against the real server** (`s3_store.rs`, `store_tiler.rs`)
+
+| Operation or test | SeaweedFS 4.48 | Versity Gateway v1.9.0 |
+| --- | --- | --- |
+| SigV4 header auth, real payload hash (every test) | pass | pass |
+| Wrong secret | 403 `SignatureDoesNotMatch` | 403 `SignatureDoesNotMatch` |
+| Unknown access key | 403 `InvalidAccessKeyId` | 403 `InvalidAccessKeyId` |
+| Signed an hour from the server clock | 403 `RequestTimeTooSkewed` | 403 `RequestTimeTooSkewed` |
+| CreateBucket, then again (`BucketAlreadyOwnedByYou` tolerated) | pass | pass |
+| Put with label and provenance, get byte-identical, head returns label, provenance, sha256, size, media type | pass | pass |
+| Put with a default (empty) provenance, head returns it | **fail: the empty header is dropped** (server gap) | pass |
+| Same key overwritten by a raw signed PUT, get refuses `HashMismatch` | pass | pass |
+| Get / head of an unknown key | 404 `NoSuchKey` / 404 (no body), both `NotFound` | 404 `NoSuchKey` / 404, both `NotFound` |
+| Over-clearance get refused before any request | pass | pass |
+| Running container's image id equals the record | pass | pass |
+| `store_tiler` (2 tests) | pass | pass |
+| `s3_store` wall time (8 tests, one container each) | 27.8 s | 3.7 s |
+
+**Python, every store-dependent test** (the 24 that skipped for MinIO, plus `test_store_record.py`)
+
+| File | SeaweedFS 4.48 | Versity Gateway v1.9.0 |
+| --- | --- | --- |
+| `test_viewer_tiles_route.py` (7) | 6 failed | pass |
+| `test_viewer_layers_stream.py` (15) | 15 errors at setup (calibration fetch of 0/0/0 answered 404) | pass |
+| `test_tiles_container.py` (1) | 1 failed | pass |
+| `test_catalog_tilesets_route.py` | pass | pass |
+| `test_store_record.py`, `services/cfs/tests/test_image_digest.py` | pass (1 unrelated skip: the cFS build artefacts) | pass (the same skip) |
+| Summary | 7 failed, 59 passed, 1 skipped, 15 errors | 81 passed, 1 skipped |
+
+**The one failure, root-caused** (the task 2 worker, through a logging proxy and a direct
+`curl --aws-sigv4` probe; the manager re-ran the probe against both servers):
+- SeaweedFS 4.48 drops a user-metadata header whose value is empty. A PUT with
+  `x-amz-meta-av-empty:` (empty) and `x-amz-meta-av-full: abc` HEADs back with only
+  `X-Amz-Meta-av-full`.
+- Versity Gateway returns both. MinIO kept empty values too.
+- `av-store` writes `x-amz-meta-av-provenance` as base64 of the encoded `Provenance`, which is empty
+  for a default message. `av-tile-fixture` puts every tile that way.
+- On SeaweedFS, HEAD came back without the header, and `metadata::decode` returned `MetadataMissing`
+  (correct: no silent default).
+- `av-tiles` then turned that store failure into a 404 (defect 1).
+- Class: a server gap.
+
+### Choice
+
+Versity Gateway v1.9.0 is chosen (decision 1).
+- It passes every test.
+- SeaweedFS has one gap, and it is consequential: every object `av-store` writes with a default
+  provenance is unreadable through it. That gap could only be closed by changing `av-store`'s
+  metadata format (the lead's ruling A3), and nothing else weighed for SeaweedFS.
+- Versity is also the smaller surface: one gateway process, 76 Go modules rather than 252, no
+  telemetry to turn off, no unauthenticated admin listener inside the container, and no declared
+  volume.
+- Its recorded limitations are in `services/store/IMAGE_DIGEST.md`: an upstream build from a tree
+  marked dirty, metadata in extended attributes, and single-account mode.
+
+### The kit
+
+The kit keeps the server operator-supplied, pinned and verified by digest exactly as PostGIS is
+(decision 3; the lead accepted it for this round). `scripts/kit/operator_supplied.json`'s item 5 is
+`versitygw`, and a site that deploys the object store builds its kit with
+`--declare-operator-supplied versitygw`.
+- **Why not the image whole.** The server is Apache-2.0, but the image's base layers are Alpine
+  3.24.2. Its package database lists eight GPL-2.0-only packages (`busybox`, `busybox-binsh`,
+  `ssl_client`, `apk-tools`, `libapk`, `alpine-baselayout`, `alpine-baselayout-data`, `scanelf`).
+  `musl-utils` is MIT AND BSD-2-Clause AND GPL-2.0-or-later, and `ca-certificates-bundle` is
+  MPL-2.0 AND MIT. The kit redistributes no GPL or LGPL code (question 251), so it cannot carry the
+  image whole.
+- **The application layer, open.** The kit could carry only an application layer: the static Go
+  binary on the pinned bookworm-slim base, as the cFS and plugin images are carried. That needs:
+  - a licence inventory of the 76 Go modules linked into the binary;
+  - an SBOM for them;
+  - the store tests re-run against the image the kit builds.
+
+  It is recorded as open (the lead's ruling B1).
+- **What changed to match.** `docs/kit-operator-supplied.md` (item 5 and "Items 4 to 6"),
+  `scripts/kit/README.md`, the builder's and checker's text, and `tests/test_kit_operator_supplied.py`
+  all agree. No SBOM generator changed, because a service image has no SBOM in the kit. The lead
+  regenerates `docs/compliance/`.
+
+### Defects found, and their root causes
+
+1. **`av-tiles` answered 404 for a store failure.** Root cause: `core::fetch` mapped every
+   `ObjectSourceError::Backend` to the caller's not-found refusal, so an object whose metadata the
+   store did not return was counted `tiles_manifest_not_found`. Fixed (`a1b7ef4`): a typed
+   `StoreBackend` refusal, 502, with its own counter. Perturbed: mapping `Backend` back to not-found
+   fails the core tests and the real-server test.
+2. **SeaweedFS 4.48 drops an empty user-metadata value.** A server gap, proved with a direct
+   `curl --aws-sigv4` probe. It decided the trial. `av-store` was not changed: `decode` still
+   refuses a missing header (no silent default), and its metadata format is unchanged (the lead's
+   ruling A3 is moot).
+3. **Test containers left anonymous volumes behind.** `ManagedContainer::stop_and_remove` (Rust),
+   the Python store and PostGIS removals, and `prune_stale_labelled_resources` removed containers
+   without `-v`. A container's anonymous volumes carry no label, so the label-filtered volume sweep
+   never saw them. This is question 255's leak class. Fixed (`8be5595`, `56f5977`, `b3cfbc7`). A
+   test proves the prune; without `-v` it fails on the volume. Dangling volumes stayed at 27
+   through every container run of this round.
+4. **`test_catalog_tilesets_route.py` leaked its store container if PostGIS failed to start.**
+   Root cause: PostGIS was started outside the store's cleanup scope. Fixed (`56f5977`).
+5. **The other `docker rm -f` calls without `-v`.** These are listed for the lead, not changed (other
+   teams' files):
+   - `tests/test_kit_zero_egress_install.py:1429`: the edge-plugin kit image declares a `VOLUME`
+     and mounts only keys, so this is likely a real leak.
+   - `scripts/kit/live_evidence.py:323` (av-ingest, which declares a `VOLUME`).
+   - `scripts/kit/d5_three_placements.py:350`.
+   - `tests/test_edge_plugin_container.py:443`, `:720` and `:759` (named volumes at the `VOLUME`).
+   - `tests/test_kit_zero_egress_install.py:550`.
+   - `tests/test_lockstep_ref.py:396` and `:406` (its image was not checked).
+   - Low risk: the rest (`live_evidence.py:224`, `test_docker_image_tags.py:187` with
+     `--tmpfs`, `test_kit_zero_egress_install.py:1131`, `test_proposer_container.py:373`,
+     `test_edge_plugin_hardening_alpine.py:258`).
+
+### Decisions taken this round (numbered for the lead's log)
+
+1. **Versity Gateway v1.9.0 is the store** (above). The lead accepted it.
+2. **The record is the one home for how to start the server.** `services/store/IMAGE_DIGEST.md`
+   carries a launch record: container port, health path, credential-environment templates and
+   server arguments. It has three readers that share its semantics: `av_lockstep::docker::
+   parse_recorded_launch` (Rust), `altavista/store_record.py` (Python) and the dev script's awk.
+   No test names a server, so replacing the server is an edit of the record. The trial was exactly
+   that: one record per candidate, the same tests.
+3. **The kit keeps the server operator-supplied** (above). The component id is `versitygw`, a
+   product name as `postgis` and `clickhouse` are.
+4. **Both candidates were pulled once, by OCI index digest.** The platform manifests are recorded,
+   so an x86_64 host resolves the same reference. The licence was confirmed from each project's own
+   `LICENSE` at the release tag and from the image label.
+5. **The tests prove that signatures are enforced.** A round trip alone proves nothing about SigV4:
+   SeaweedFS accepts any key when it has no credentials configured. So a wrong secret, an unknown
+   key and a request signed an hour off must each be refused with 403. Perturbed: SeaweedFS started
+   without credentials fails both of those tests.
+6. **SeaweedFS was never run with its defaults.** Its default reports to
+   `telemetry.seaweedfs.com`, so it ran with `-master.telemetry=false`, and its admin UI, WebDAV,
+   Iceberg and Lance listeners were off. Every container published on loopback only, with
+   credentials generated per run.
+7. **Conditional, Range, multipart and list requests were not exercised.** `av-store` uses none of
+   them. The drop-in claim covers its four operations.
+8. **A committed test never reads the round folder.** The manager removed task 2's test of the
+   alternative trial record, which lived outside the repository.
+9. **The ten-gigabyte proof's data directory is the record's last argument.** The script refuses a
+   record whose last argument is not absolute. The manager checked that metadata, empty values
+   included, survives on the host bind mount that proof uses.
+10. **The first task 5 worker stopped on read-cache stubs.** Its session's read cache returned stubs
+    for `00-rules.md` and `CLAUDE.md`, and it changed nothing, correctly. Tasks 5 to 7 were briefed
+    with the rules inline.
+11. **`develop` was merged with a merge commit, no rebase** (the lead's instruction). There were no
+    conflicts. The kit tests on the merged tree gave 303 passed and 18 skipped: `develop`'s 301 plus
+    this round's two pin tests.
+12. **The SeaweedFS image stays on the host by digest.** It is untagged, and nothing removes it.
+    `docker rmi` is never used.
+
+### Gates
+
+The gate ran at `d5b3fa0`, the last code commit, which already contains the merge of `develop` at
+`4aafdd3`. It used `/Users/probe/code/altavista-lead/rounds/heavy-s3/gate/run_gate.sh`. Phases ran in
+sequence, and each phase's whole output was captured before it was read.
+
+| Gate | Result |
+| --- | --- |
+| `buf breaking proto --against /Users/probe/code/AltaVista/proto` | **clean, exit 0** (no proto change) |
+| `buf lint proto` | **clean, exit 0** |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | **186 binaries, 1946 passed, 0 failed, 4 ignored, exit 0**, 2930 s. The `av-store`, `av-jobs` and `av-tiles` real-server tests ran against Versity Gateway, and none skipped. |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **clean, exit 0** |
+| the same clippy for `av-kernel`, `av-run` and `av-sweep` with `--no-default-features` | **clean, exit 0** each |
+| required-features lint (its steps run through `cargo-slot`) | **clean**: 5 groups |
+| `cargo deny check` | **advisories ok, bans ok, licenses ok, sources ok** |
+| `cargo test -p av-orbital --no-default-features` | **15 binaries, 142 passed, 0 failed** |
+| `cargo-slot build -p av-edge-board --bins` | **built, exit 0** |
+| `cargo test -p av-kernel --no-default-features` | **21 binaries, 769 passed, 0 failed** |
+| `cargo test -p av-kernel --no-fail-fast` | **58 binaries, 1032 passed, 0 failed, 1 ignored**, 652 s. The 5 visible skips are opt-ins and this Colima's UDP forwarding, as before. |
+| Renode test (`drm_attitude_control_renode`) | **1 passed** |
+| stand-in HIL test (`hil_standin_renode`) | **1 passed** |
+| every `web/js/**/*_check.mjs` | **29 of 33 exit 0**. The four argument-driven harnesses print their usage (`command_panel`, `panels`, `timeline` exit 2; `layers_stream` exits 1) and pass under pytest. |
+| the real-Chrome viewer tests | **40 passed**, 317 s |
+| `CFS_MIRROR_DIR=… cargo-slot --hold -- .venv/bin/python -m pytest -q -rs` | **1724 passed, 9 failed, 28 skipped**, 2902 s |
+
+**The nine pytest failures are recorded state behind the tree, not store behaviour.** All of them
+are for the lead's merge step, as in earlier rounds:
+- **Seven are the committed Rust SBOMs' epoch.** These are `test_sbom.py::test_the_epoch_is_never_wall_clock`
+  for the six Rust components, plus `test_all_six_rust_components_share_exactly_one_epoch_from_git`.
+  The cause is `a1b7ef4`, which added `av-tiles` dev-dependencies, moving `Cargo.lock` and
+  `crates/av-tiles/Cargo.toml`. Those are inputs to the Rust epoch, so the committed SBOMs (dated
+  07:43:59Z) are older than the tree (22:05:48Z). This is compliance regeneration, the lead's.
+- **`test_tiles_container.py`** fails on question 232's provenance rule: the tiles image is stale by
+  commit (`8be5595`, `a1b7ef4`, `1d06878`, `d5b3fa0` touch its copied paths). It passed, against
+  Versity Gateway, at `56f5977` (the trial). It needs `services/tiles/build-image.sh`, which needs the
+  network.
+- **`services/cfs/tests/test_image_digest.py::test_image_digest_matches_recorded_value`** fails on
+  the same rule. `Cargo.lock` is one of the cFS image's copied paths, and `a1b7ef4` moved it. The
+  shim does not depend on `av-tiles`, so its binary is expected to be unchanged, but that is not
+  measured.
+
+**Skips.** The 28 skips are the visible opt-ins (`AV_SBOM_REBUILD`, `AV_KIT_*`, the unbuilt proof
+kit, `AV_CFS_RUN_REPRO_BUILD`, the two cFS build artefacts). None names the store image. The last
+gate had 52 skips, 24 of them for MinIO. The six Rust MinIO skips are gone too.
+
+**Host state.** `target/debug/deps` grew from 68,938 to 114,774 entries during the gate, past
+question 236's threshold. It is for the lead to move aside before the next gate.
+
+### What remains, each with its reason
+
+- **The kit carrying the server as an application layer.** Open, the lead's ruling B1 (above).
+- **Re-pinning the images whose copied paths this round touched.** The tiles image is affected
+  through `crates/av-store`, `crates/av-tiles` and `services/tiles/Dockerfile`, the sweep image
+  through `crates/av-lockstep`, `av-jobs` and `av-sweep`, and the cFS image through `Cargo.lock`.
+  Their builds need the network (apt in the prebuild), which this round does not have. Re-pinning
+  is the lead's step at the merge, as in earlier rounds.
+- **Compliance.** `Cargo.lock` gained `av-tiles`' dev-dependencies, and `av-tiles` has a new refusal
+  code. The lead regenerates `docs/compliance/`.
+- **The other `docker rm -f` without `-v`** (defect 5), for their owners.
+- **Question 260** (ClickHouse operator-supplied) is queued for this team's next round.
