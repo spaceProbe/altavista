@@ -40,16 +40,15 @@
 //! # What "byte-identical" claims, and what it does not
 //!
 //! The k8s study equals the container study byte for byte (`sweep_results.pb`, `sweep_results.json`
-//! and every sample's `run_products.pb`): the same image, the same glibc. It does **not** equal a
-//! study run by this host's macOS-native binary, and the test records that instead of hiding it:
-//! the native study is itself reproducible (run twice, identical), the differences are confined to
-//! trajectory means and score values (millimetres of position at the end of a day), and the cause is
-//! the platform's libm -- Apple's `cos`/`sin` and glibc's give results one ulp apart for the same
-//! f64 argument on a few percent of inputs, and `av_orbital::fk5::nutation` is built from 106
-//! `sin_cos` calls plus three more; a one-ulp difference there moves the nutation matrix, hence the
-//! body-fixed rotation, hence the gravity acceleration, and the integration carries it forward. The
-//! heavy-ct-2b report has the probe that shows it quantity by quantity. `AV_SWEEP_REQUIRE_NATIVE_EQUAL=1`
-//! turns "recorded" into "asserted" for a platform where the two do agree.
+//! and every sample's `run_products.pb`), and since question 258 both equal the study run by this
+//! host's macOS-native binary, asserted. Question 248 found the native study differing from the
+//! Linux image in 14 of 14 hashes because Apple's libm and glibc give `sin`/`cos`/... results one
+//! ulp apart on a few percent of inputs, which `av_orbital::fk5::nutation` (106 `sin_cos` calls)
+//! carried into the integrated state. Question 258 routed every native-path transcendental through
+//! `av_dynamics::math` (the pure-Rust `libm` crate), and the opt-in `AV_SWEEP_REQUIRE_NATIVE_EQUAL=1`
+//! became an unconditional assertion. A failure there most likely means the sample image is stale
+//! (built before that change); the message says so. Where the studies differ, the report still
+//! records which `run_products.pb` differ only in trajectory means, covariances and score values.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -805,9 +804,9 @@ fn k8s_container_and_native_studies_are_byte_identical_and_several_pods_run_at_o
     let _ = writeln!(report, "RESULT: k8s == container byte for byte: {ab}; k8s == native: {ac}; container == native: {bc}; native == native again: {cc}");
     if !ac {
         // Where they differ, how: every differing run_products.pb is compared again with the
-        // trajectory means/covariances and the score values removed. The root cause of the
-        // differences is the platform's libm (see the report of heavy-ct-2b): the same f64 inputs
-        // give sin/cos/... results one ulp apart on Apple's libm and on glibc.
+        // trajectory means/covariances and the score values removed. Before question 258 the cause
+        // was the platform's libm (heavy-ct-2b's report, question 248); since then a numeric-only
+        // difference most likely means a sample image built before the libm change.
         let names: Vec<String> = differences(&a, &c).into_iter().filter(|n| n.ends_with("run_products.pb")).collect();
         let numeric_only = names.iter().filter(|n| numeric_only_difference(&a.dir.join(n), &c.dir.join(n))).count();
         let _ = writeln!(report, "native vs k8s: {} of {} run_products.pb differ; {numeric_only} of them differ ONLY in trajectory means, covariances and score values (everything else -- ids, events, provenance, hashes, frames -- is byte-identical)", names.len(), a.results.samples.len());
@@ -822,9 +821,15 @@ fn k8s_container_and_native_studies_are_byte_identical_and_several_pods_run_at_o
     let _ = writeln!(report, "stderr.txt: {k8s_equal} of {} sample logs (container log) equal the k8s pod log byte for byte", b.stderr_txt.len());
     write_proof("three_way_byte_identity", &report);
     assert!(ab, "the k8s study and the container study differ: {:?}", differences(&a, &b));
-    if std::env::var("AV_SWEEP_REQUIRE_NATIVE_EQUAL").as_deref() == Ok("1") {
-        assert!(ac, "the native study differs from the k8s study: {:?}", differences(&a, &c));
-    }
+    // Question 258: native runs evaluate every transcendental through `av_dynamics::math` (the
+    // pure-Rust `libm` crate), so this host's native study must equal the Linux image's byte for
+    // byte. This used to be opt-in (`AV_SWEEP_REQUIRE_NATIVE_EQUAL=1`, question 248); it is now
+    // always asserted.
+    let stale = "the likely cause is a stale sweep image: av-sweep-sample:local built before question 258's \
+                 libm change (or from a different tree) still carries the platform-libm binary -- rebuild it with \
+                 services/sweep/build-image.sh and re-record services/sweep/IMAGE_DIGEST.md";
+    assert!(ac, "the native study differs from the k8s study: {:?}; {stale}", differences(&a, &c));
+    assert!(bc, "the native study differs from the container study: {:?}; {stale}", differences(&b, &c));
 }
 
 #[test]
