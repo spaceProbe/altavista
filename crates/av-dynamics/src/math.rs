@@ -9,6 +9,16 @@
 //! is outside this) goes through the functions below, which evaluate the pure-Rust `libm` crate:
 //! the same Rust source on every target, so the same bits on every platform.
 //!
+//! **The guard.** `clippy.toml` in `crates/av-dynamics`, `crates/av-orbital` and `crates/av-kernel`
+//! disallows the platform's `f64` and `f32` transcendental methods. The lint is allowed
+//! package-wide (each `Cargo.toml`'s `[lints.clippy]`), so test code, integration tests and
+//! examples keep `std` as their reference. It is denied outside `cfg(test)` on the native path:
+//! - in `av-dynamics` and `av-orbital`, by the crate-root attribute;
+//! - in `av-kernel`, by the attributes on `drm`, `rng` and `interpolate`.
+//!
+//! A platform call there fails `cargo clippy --workspace --all-targets -- -D warnings`. This module
+//! needs no exemption, because it calls `libm`, never an `f64` method.
+//!
 //! What stays on `std`, and why that is not a platform dependence:
 //!
 //! - `sqrt`: IEEE 754 requires it correctly rounded, and every target this repository builds for

@@ -144,6 +144,10 @@
 //! [`frame`]/[`model`] (everything except [`frame_gmat`] itself) still build and unit-test
 //! cleanly without it -- see this crate's own N1 report for the verified command and output.
 
+// Question 258: no platform transcendental on the native path (the list is this crate's clippy.toml;
+// use `av_dynamics::math`). Denied outside `cfg(test)` only: test code keeps `std` as reference.
+#![cfg_attr(not(test), deny(clippy::disallowed_methods))]
+
 pub mod cof;
 pub mod de;
 pub mod drag;

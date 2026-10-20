@@ -36,6 +36,10 @@
 //! `M: DynamicsModel` into that shape by converting `M::Error` to `ModelError`. See both
 //! modules' doc comments for why the trait itself did not need to change to get here.
 
+// Question 258: no platform transcendental on the native path (the list is this crate's clippy.toml;
+// use `av_dynamics::math`). Denied outside `cfg(test)` only: test code keeps `std` as reference.
+#![cfg_attr(not(test), deny(clippy::disallowed_methods))]
+
 use std::collections::BTreeMap;
 
 pub mod erase;

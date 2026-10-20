@@ -246,3 +246,9 @@ required-features = ["gmat"]
 [[example]]
 name = "gen_expr_goldens"
 required-features = ["gmat"]
+
+# Question 258: `clippy::disallowed_methods` (the platform transcendentals listed in this crate's
+# clippy.toml) is allowed package-wide so test code, integration tests and examples keep `std` as
+# reference values, and denied by the crate's own attributes outside `cfg(test)` on the native path.
+[lints.clippy]
+disallowed_methods = "allow"

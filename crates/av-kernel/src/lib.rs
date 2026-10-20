@@ -86,13 +86,19 @@ pub mod clock;
 /// crate's own build: `pub use ... as` binds the extern crate's root module under the local
 /// name, so paths through it work exactly like a `pub mod` would.
 pub use av_codec as codec;
+// Question 258: the native path's DRM models, rng and interpolate may not call a platform
+// transcendental (the list is this crate's clippy.toml; use `av_dynamics::math`). Denied outside
+// `cfg(test)` only: test code keeps `std` as reference.
+#[cfg_attr(not(test), deny(clippy::disallowed_methods))]
 pub mod drm;
 pub mod expr;
+#[cfg_attr(not(test), deny(clippy::disallowed_methods))]
 pub mod interpolate;
 pub mod kernel;
 pub mod pacing;
 pub mod ports;
 pub mod registry;
+#[cfg_attr(not(test), deny(clippy::disallowed_methods))]
 pub mod rng;
 pub mod router;
 pub mod schedule;

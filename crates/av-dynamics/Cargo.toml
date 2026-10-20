@@ -22,3 +22,9 @@ openssl = "0.10"
 # Default features (`arch`) only route `sqrt`/`fma`/`rint` to hardware instructions, all exact or
 # correctly rounded.
 libm = "0.2.16"
+
+# Question 258: `clippy::disallowed_methods` (the platform transcendentals listed in this crate's
+# clippy.toml) is allowed package-wide so test code, integration tests and examples keep `std` as
+# reference values, and denied by the crate's own attributes outside `cfg(test)` on the native path.
+[lints.clippy]
+disallowed_methods = "allow"
