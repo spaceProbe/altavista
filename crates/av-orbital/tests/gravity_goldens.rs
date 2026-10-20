@@ -224,7 +224,8 @@ const P0_SPIKE_INTEGRATOR_ONLY_RESIDUAL_M: f64 = 5.7e-3;
 /// `Dopri5` default, rtol=atol=1e-12, vs GMAT's `PrinceDormand78` at 1e-13 -- two different
 /// Runge-Kutta pairs at similar-but-not-identical tolerances), not a force-model defect.
 /// Tolerance set just above the measured value (this task's own rule), never loosened without
-/// a measurement.
+/// a measurement. Re-measured 2026-10-19 after question 258 moved every native transcendental
+/// onto the `libm` crate: 4.555853e-3 m / 5.048311e-6 m/s (75.9% / 84.1% of the tolerance).
 #[test]
 fn leo_1day_jgm2_8x8_trajectory_residual() {
     let (dr, dv, _wall_s) = measure_trajectory_residual("leo_1day_jgm2_8x8", "TrajA");
@@ -269,7 +270,9 @@ fn leo_1day_jgm2_8x8_acceleration_agreement() {
 /// less time for the integrator-family disagreement to accumulate), 0.05x the P0 spike's
 /// 5.7 mm/DAY reference (not a fair direct ratio, since this arc is 1/4 the duration, but
 /// still far below it in absolute terms). Confirmed by the acceleration-agreement test below
-/// to be integrator cost, not a force-model defect, exactly as golden A.
+/// to be integrator cost, not a force-model defect, exactly as golden A. Re-measured 2026-10-19
+/// after question 258's `libm` change: 2.745443e-4 m / 3.045939e-7 m/s (54.9% / 60.9% of the
+/// tolerance).
 #[test]
 fn leo_6h_egm96_70x70_trajectory_residual() {
     let (dr, dv, _wall_s) = measure_trajectory_residual("leo_6h_egm96_70x70", "TrajB");

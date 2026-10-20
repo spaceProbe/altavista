@@ -297,6 +297,10 @@ fn m5_full_arc_trajectory_residual_measured() {
     // reference only and never asserted against here -- it pins that DIFFERENT code path, per
     // this task's own rule).
     //
+    // Re-measured 2026-10-19 after question 258 moved every native transcendental onto the `libm`
+    // crate (same host, debug build): 6.831605e1 m / 8.029062e-2 m/s before that change,
+    // 6.831607e1 m / 8.029064e-2 m/s after -- 62.1% / 61.8% of the bound below.
+    //
     // Root cause, as far as this task's own effort budget reaches (see this task's own report
     // for the full arithmetic): the dominant candidate is the Jacchia-Roberts density
     // disagreement `tests/drag_goldens.rs` already measured against GMAT's own atmosphere

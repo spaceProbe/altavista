@@ -97,7 +97,9 @@
 //! below for the exact formula). This is a defect in THIS TEST's own measurement, not in
 //! `crate::fk5`'s physics -- no line in `src/fk5.rs` changed for this finding.
 //!
-//! **Measured after the fix:** `max_angle_rad = 1.5193960324222241e-9` rad (0.313 mas),
+//! **Measured after the fix** (platform libm; re-pinned to `1.5193960323497342e-9` on 2026-10-19
+//! when question 258 moved the native path onto the `libm` crate, see the constant below):
+//! `max_angle_rad = 1.5193960324222241e-9` rad (0.313 mas),
 //! `rms_angle_rad = 8.47424265852711e-10` rad (0.175 mas) -- a **27.7x** reduction in the max and
 //! **15.6x** in the RMS from the un-attributed `acos`-inflated numbers above, landing at a level
 //! consistent with ordinary floating-point differences between two independently-implemented
@@ -251,8 +253,19 @@ fn native_fk5_rotation_matches_the_gmat_convert_shim_at_a_thousand_epochs() {
     // over a real measurement, not a value fitted to make this pass; if a future change
     // regresses accuracy by less than 3x it will not be caught here, which is the deliberate
     // tradeoff of "generous margin, no flakiness" over "tight bound, occasional false failure."
+    //
+    // Re-pinned 2026-10-19 (question 258): with every native transcendental on the `libm` crate,
+    // the same run gives
+    //
+    //   n5-pin-result: max_angle_rad=1.5193960323497342e-9 rms_angle_rad=8.474242661739127e-10
+    //   max_displacement_m=9.690914988005813e-3 rms_displacement_m=5.404987473584695e-3
+    //   max_r_dot_abs_diff_per_s=1.0911357385521734e-13
+    //   r_dot_implied_velocity_residual_m_per_s=6.959412462286926e-7
+    //
+    // so `MEASURED_MAX_ANGLE_RAD` moved from 1.5193960324222241e-9 (the platform libm, above) to
+    // 1.5193960323497342e-9, and `MEASURED_MAX_R_DOT_DIFF` did not move.
     // ---------------------------------------------------------------------------------------
-    const MEASURED_MAX_ANGLE_RAD: f64 = 1.5193960324222241e-9;
+    const MEASURED_MAX_ANGLE_RAD: f64 = 1.5193960323497342e-9;
     const MEASURED_MAX_R_DOT_DIFF: f64 = 1.0911357385521734e-13;
     const MARGIN: f64 = 3.0;
     let angle_tolerance_rad = MEASURED_MAX_ANGLE_RAD * MARGIN;

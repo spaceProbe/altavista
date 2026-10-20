@@ -355,6 +355,11 @@ fn demo_drm_runs_both_models_and_scores_their_position_difference() {
     //     max   = 1.24971901366127523e-5 m
     //     final = 1.21115561183108794e-5 m
     //
+    // Re-measured 2026-10-19 after question 258 moved the native model onto the `libm` crate
+    // (same host, debug build): max = 1.35148338581117622e-5 m, final = 1.26800068652791672e-5
+    // m -- still not monotone (max > final by 8.3e-7 m), and 0.11% of the 0.012 m tolerance. The
+    // "1.2e-5 m" above now reads 1.35e-5 m; the 0.012 m tolerance did not move.
+    //
     // The series is NOT monotone: the difference carries an orbital-period ripple (the two
     // integrators differ in phase along the orbit as well as in magnitude), so the maximum falls
     // strictly inside the window and `max > final` by about 3.9e-7 m. The inequality above is

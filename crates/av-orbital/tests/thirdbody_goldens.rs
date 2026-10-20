@@ -233,7 +233,10 @@ fn leo_1day_jgm2_8x8_sunmoon_acceleration_agreement() {
 /// disagreement (this model's `Dopri5` default vs GMAT's `PrinceDormand78` at
 /// `Accuracy=1e-13`), not a force-model defect, UNCHANGED in kind by the TDB series
 /// correction. No further root-cause chain was needed (see this crate's N2 report), and this
-/// test's own tolerance (below) did not need to move.
+/// test's own tolerance (below) did not need to move. Re-measured 2026-10-19 after question 258
+/// moved every native transcendental onto the `libm` crate: 4.540713e-3 m / 5.031362e-6 m/s
+/// before that change, 4.533808e-3 m / 5.023808e-6 m/s after (75.6% / 83.7% of the 6e-3 / 6e-6
+/// tolerance).
 #[test]
 fn leo_1day_jgm2_8x8_sunmoon_trajectory_residual() {
     let (dr, dv, _wall_s) = measure_trajectory_residual("N2TrajA");

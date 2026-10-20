@@ -1314,6 +1314,7 @@ mod tests {
         }
         eprintln!("n4-symplectic: max |Phi^T J Phi - J| = {max_dev:e} over {dt_ns} ns two-body arc");
         // MEASURED (debug build, this host): 5.872545116858419e-9 over a 3600 s two-body arc.
+        // Re-measured 2026-10-19 after question 258's `libm` change: 5.863366236980028e-9.
         // Tolerance set just above it (this task's own rule): 1e-7.
         assert!(max_dev < 1e-7, "Phi^T J Phi - J max deviation {max_dev:e} exceeds 1e-7 on a pure two-body (symplectic) arc");
     }
