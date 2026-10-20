@@ -29,26 +29,39 @@ struct Relay {
     stderr: PathBuf,
 }
 
-fn free_udp_port() -> u16 {
-    UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
-}
-
 impl Relay {
+    /// The relay binds UDP port 0 itself and the test reads the bound address from its
+    /// "listening" line. Picking a free port here and passing it in was a race (question 263):
+    /// the port was released before the relay bound it, another socket on the host could take it
+    /// in between, and the relay then exited with "Address already in use" (4 spawns in 150 runs).
     fn spawn(tag: &str, extra: &[String]) -> Self {
         let dir = std::env::temp_dir();
         let socket = dir.join(format!("av-relay-{}-{tag}.sock", std::process::id()));
         let stderr = dir.join(format!("av-relay-{}-{tag}.stderr", std::process::id()));
-        let udp: SocketAddr = format!("127.0.0.1:{}", free_udp_port()).parse().unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_av-lockstep-relay"))
-            .args(["--socket-path", socket.to_str().unwrap(), "--udp-listen", &udp.to_string()])
+            .args(["--socket-path", socket.to_str().unwrap(), "--udp-listen", "127.0.0.1:0"])
             .args(extra)
             .stdout(Stdio::null())
             .stderr(std::fs::File::create(&stderr).unwrap())
             .spawn()
             .expect("spawn av-lockstep-relay");
-        let relay = Self { child, socket, udp, stderr };
-        wait_until("the relay to listen", || relay.socket.exists() && relay.log().contains("listening for the guest"));
-        relay
+        let mut relay = Self { child, socket, udp: "0.0.0.0:0".parse().unwrap(), stderr };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let log = relay.log();
+            if relay.socket.exists() {
+                if let Some(addr) = listening_udp_addr(&log) {
+                    relay.udp = addr;
+                    return relay;
+                }
+            }
+            // A relay that exited will never listen: fail now, with what it said.
+            if let Some(status) = relay.child.try_wait().unwrap() {
+                panic!("the relay ({tag}) exited with {status} before listening: {log}");
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for the relay ({tag}) to listen: {log}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     fn log(&self) -> String {
@@ -69,6 +82,13 @@ impl Drop for Relay {
         let _ = std::fs::remove_file(&self.socket);
         let _ = std::fs::remove_file(&self.stderr);
     }
+}
+
+/// The UDP address in the relay's "listening for the guest on … and for the peer on UDP <addr> (…)"
+/// line, which it prints after both binds succeed.
+fn listening_udp_addr(log: &str) -> Option<SocketAddr> {
+    let line = log.lines().find(|l| l.contains("listening for the guest"))?;
+    line.split("for the peer on UDP ").nth(1)?.split_whitespace().next()?.parse().ok()
 }
 
 fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
