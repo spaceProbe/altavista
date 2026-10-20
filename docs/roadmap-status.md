@@ -1,7 +1,7 @@
 # Roadmap status
 
 As of 2026-10-19, against the phase table in `architecture.md`. Decisions are numbered in
-`open-questions.md` (1–261); each track's plan records its rounds and its `## Delivered` section.
+`open-questions.md` (1–262); each track's plan records its rounds and its `## Delivered` section.
 
 ## By phase
 
@@ -37,5 +37,5 @@ recipe is in `README.md`.
 
 1. ClickHouse as an operator-supplied component (question 260, heavy round next).
 2. The open heavy and native items above, as one round per team when the user charters them.
-3. Cross-platform reproducibility for native runs (question 258): measured (14 of 14 hashes equal across macOS and Linux arm64 with the portable `libm`), adoption round running.
+3. (Done, question 262: native runs are byte-identical across macOS arm64, Linux aarch64 and Linux x86_64.)
 4. Hardware in the loop, when the user resumes it.
