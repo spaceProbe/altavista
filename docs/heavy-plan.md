@@ -4374,6 +4374,16 @@ gate had 52 skips, 24 of them for MinIO. The six Rust MinIO skips are gone too.
 **Host state.** `target/debug/deps` grew from 68,938 to 114,774 entries during the gate, past
 question 236's threshold. It is for the lead to move aside before the next gate.
 
+Dangling anonymous volumes went from 27 to 50 during the gate's window:
+- **22 PostGIS volumes**, in two bursts of 11, at 17:11 and 18:20. The second burst came during
+  this gate's Renode phase, which starts no PostGIS container. Re-run at this head after the gate,
+  `av-catalog`'s `catalog_postgis` (9 PostGIS containers, through `ManagedContainer`, now `rm -v`)
+  left none (50 → 50). So both bursts are attributed to another process on the shared daemon running
+  a tree without the `rm -v` fix. The `docker events` log names the image but not the worktree.
+- **One `av-edge-plugin:local` volume**, at 19:03, during this gate's pytest phase. It is attributed
+  by time to `tests/test_edge_plugin_container.py`'s ingest container, removed with `rm -f` and no
+  `-v` (defect 5). That was not separately reproduced.
+
 ### What remains, each with its reason
 
 - **The kit carrying the server as an application layer.** Open, the lead's ruling B1 (above).
