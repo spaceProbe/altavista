@@ -13,14 +13,11 @@ host only because `../spoore` from `AltaVista-edge/` happens to already equal
 `/Users/probe/code/spoore`.
 
 This test walks every Cargo.toml git actually tracks and asserts no absolute
-`/Users/probe/...` path dependency exists in any of them, with exactly one declared, commented,
-POSITIVE exception list: `crates/av-proposer/Cargo.toml`'s own two remaining absolute spoore
-path deps (`spoore-models`, `spoore-ml`) -- `crates/av-proposer` is off-limits to this track
-(round 4 brief) and is the heavy track's own remaining half of question 219(b)/(c). "Positive"
-means the exception list is asserted to still be accurate, not just used to silence a check: if
-the heavy track relativizes av-proposer's two lines, `test_every_declared_exception_is_still_
-present` below starts failing, forcing this file's exception list (and this docstring) to be
-edited rather than silently continuing to permit something already fixed.
+`/Users/probe/...` path dependency exists in any of them, against a declared, commented,
+POSITIVE exception list. Its last entries, `crates/av-proposer/Cargo.toml`'s `spoore-models`
+and `spoore-ml`, were made relative at question 261 (when `test_every_declared_exception_is_
+still_present` failed on them, as designed), so the list is now empty. "Positive" means any
+entry is asserted to still be accurate, not just used to silence a check.
 
 Round 4 (the defect this docstring's own commit fixes): three container mount sites --
 `scripts/kit/build_kit.py`, `tests/test_edge_plugin_container.py`,
@@ -64,14 +61,11 @@ _ABS_PATH_DEP_RE = re.compile(r'path\s*=\s*"(/Users/probe/[^"]*)"')
 
 # Positive exception list, keyed by repo-relative Cargo.toml path -> the exact dependency
 # lines (stripped) that are still allowed to declare an absolute /Users/probe/... path.
-# crates/av-proposer is off-limits to this track (round 4 brief); its two spoore path deps
-# are the heavy track's own remaining half of question 219(b)/(c), not this track's to fix.
-_ALLOWED_ABSOLUTE_PATH_LINES: dict[str, tuple[str, ...]] = {
-    "crates/av-proposer/Cargo.toml": (
-        'spoore-models = { path = "/Users/probe/code/spoore/crates/spoore-models" }',
-        'spoore-ml = { path = "/Users/probe/code/spoore/crates/spoore-ml" }',
-    ),
-}
+# Empty since the S3 server round's merge (question 261): crates/av-proposer's two spoore path
+# deps, the last entries, were made relative there (the remaining half of question 219(b)/(c)).
+# A new entry needs a reviewed reason, and `test_every_declared_exception_is_still_present`
+# then keeps it honest.
+_ALLOWED_ABSOLUTE_PATH_LINES: dict[str, tuple[str, ...]] = {}
 
 
 def _committed_cargo_tomls() -> list[Path]:
@@ -122,8 +116,8 @@ def test_every_declared_exception_is_still_present():
     relativizes av-proposer's remaining two lines (its own half of question 219(b)/(c)), this
     test starts failing -- forcing this file's exception entry to be deleted rather than
     silently continuing to permit something that no longer exists. A stale allowance that
-    silently permits something already fixed is the failure mode this test exists to prevent."""
-    assert _ALLOWED_ABSOLUTE_PATH_LINES, "exception list should not be empty while av-proposer exists"
+    silently permits something already fixed is the failure mode this test exists to prevent.
+    The list is empty since question 261, so this passes trivially until an entry is added."""
     for rel, lines in _ALLOWED_ABSOLUTE_PATH_LINES.items():
         path = REPO_ROOT / rel
         assert path.exists(), (
@@ -159,6 +153,17 @@ def test_av_track_four_spoore_deps_are_the_measured_relative_path():
             f"crates/av-track/Cargo.toml:{lineno}: still has an absolute path outside a "
             f"comment: {line!r}"
         )
+
+
+def test_av_proposer_two_spoore_deps_are_the_measured_relative_path():
+    """av-proposer's half of question 219(b)/(c), closed at question 261: its `spoore-models`
+    and `spoore-ml` path deps are relative at the same depth as av-track's. Absolute, they made
+    cargo see `spoore-cdm` through two manifest paths in any clone not at this host's layout
+    ("package collision in the lockfile", reproduced in the spoore-yaml round's clone)."""
+    text = (REPO_ROOT / "crates/av-proposer/Cargo.toml").read_text()
+    for name in ("spoore-models", "spoore-ml"):
+        expected = f'{name} = {{ path = "../../../spoore/crates/{name}" }}'
+        assert expected in text, f"crates/av-proposer/Cargo.toml: expected {expected!r}"
 
 
 def test_no_build_rs_hardcodes_an_absolute_spoore_path():

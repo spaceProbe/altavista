@@ -1,7 +1,7 @@
 # Roadmap status
 
 As of 2026-10-19, against the phase table in `architecture.md`. Decisions are numbered in
-`open-questions.md` (1–260); each track's plan records its rounds and its `## Delivered` section.
+`open-questions.md` (1–261); each track's plan records its rounds and its `## Delivered` section.
 
 ## By phase
 
@@ -23,19 +23,19 @@ recipe is in `README.md`.
 
 - **Hardware in the loop:** deferred by the user (question 245). When resumed: the 2024.2 ZCU104 BSP from the user for the real `BOOT.BIN` (question 243), then the board day (question 244).
 - **Reproducibility across platforms (questions 248, 258):** native runs are byte-identical on macOS arm64, Linux aarch64 and Linux x86_64 since question 258. Their transcendentals go through `av_dynamics::math` (the pure-Rust `libm` crate), held there by a clippy guard. GMAT-backed runs, and the C code inside containers and boards, stay per-platform (ADR-005's 2026-10-19 amendment). The sweep sample image must be rebuilt after that change for `k8s_sweep.rs`'s native-equals-image assertion.
-- **MinIO (questions 255, 256):** its pinned image can no longer be fetched; the heavy team is trialling SeaweedFS and Versity Gateway (Apache-2.0) to replace it.
-- **The kit (questions 251, 255):** GMAT is pinned for macOS arm64 (this host's install) and Linux x86_64 (NASA's Ubuntu archive); NASA publishes no Linux aarch64 build; the RHEL 7 archive is being pinned as a second variant (question 257).
+- **Object store (questions 256, 261):** Versity Gateway v1.9.0 replaced MinIO, operator-supplied (Alpine GPL base); carrying it as an application layer is open; nine `docker rm -f` sites without `-v` are listed in question 261 for their owners.
+- **The kit (questions 251, 255):** GMAT is pinned for macOS arm64 (this host's install) and Linux x86_64 (NASA's Ubuntu archive); NASA publishes no Linux aarch64 build; the RHEL 7 archive is pinned as the `rhel7` variant (questions 257, 261), from the recorded measurement.
 - **`serde_yaml` (questions 246, 251):** gone from AltaVista's crates; the `RUSTSEC-2024-0449` ignore stays for spoore's `spoore-tree` until the user merges the lead's spoore branch (question 259). MSRV 1.89, measured.
 - **Heavy (question 255):** globe tile selection plans for the primary only; `enableGlobe` builds WGS84 for any body; `layers_stream_check.mjs` exits 0 by construction (it needs a live gateway); two writers racing on case variants of one id on a case-sensitive filesystem can both publish; two typed store-write windows remain (an unreadable ClickHouse outcome, a rename failing after ClickHouse committed), each printing its repair.
 - **Native (question 255):** a mis-named but well-shaped emit port is not caught; `integral` over radians is `UnitCompositionUndefined`; classic-builder image ids drift across cache chains (content hashes hold).
 - **Mechanitis (question 240):** scoped read-only; AltaVista changes nothing until Mechanitis settles encoding and shared types (its ADR-003).
 - **Jacchia-Roberts drag:** the shipped binary's half of the provenance question is the lead's before an instrumented build.
-- **With the user:** the Redpanda licence review (question 6), the MinIO replacement (question 255), whether this Colima switches to the grpc port forwarder (it carries no UDP today; switching restarts the shared VM), the spoore `publish = false` merge and upstream PRs (questions 75, 207), the GMAT covariance report (question 150), the secdeploy upstream proposals.
-- **Host:** the docker-test lock and two cargo slots serialise both teams (questions 207, 229, 235); a large `target/debug/deps` is moved aside at the start of a round (question 236); Colima mounts only `$HOME` into containers; k3s's kubelet image GC deletes every unused image above 85% of the Colima VM's image disk (it took the pinned MinIO and base images on 2026-10-18; check the disk with `colima ssh -- df -h /var/lib/docker` and prune dangling anonymous volumes with the user's approval); no process is ever killed by pattern; on this host's containerd image store `docker rmi` of an image's last name deletes the image; the local shell policy refuses some commands, which are never run through a wrapper; lead tools live in `/Users/probe/code/altavista-lead/` (the session scratchpad does not survive OS updates); the `docker events` logger writes `/Users/probe/code/altavista-docker-events.log`.
+- **With the user:** the Redpanda licence review (question 6), merging the lead's spoore branch `altavista/yaml-saphyr` (question 259), whether this Colima switches to the grpc port forwarder (it carries no UDP today; switching restarts the shared VM), the spoore `publish = false` merge and upstream PRs (questions 75, 207), the GMAT covariance report (question 150), the secdeploy upstream proposals.
+- **Host:** the docker-test lock and two cargo slots serialise both teams (questions 207, 229, 235), and a long emulated compile never holds the lock (question 261); a large `target/debug/deps` is moved aside at the start of a round (question 236); Colima mounts only `$HOME` into containers; k3s's kubelet image GC deletes every unused image above 85% of the Colima VM's image disk (it took the pinned MinIO and base images on 2026-10-18; check the disk with `colima ssh -- df -h /var/lib/docker` and prune dangling anonymous volumes with the user's approval); no process is ever killed by pattern; on this host's containerd image store `docker rmi` of an image's last name deletes the image; the local shell policy refuses some commands, which are never run through a wrapper; lead tools live in `/Users/probe/code/altavista-lead/` (the session scratchpad does not survive OS updates); the `docker events` logger writes `/Users/probe/code/altavista-docker-events.log`.
 
 ## Next, in the order the lead would take it
 
-1. The MinIO replacement (question 256, heavy round running) and the RHEL 7 GMAT pin (question 257, native round).
+1. ClickHouse as an operator-supplied component (question 260, heavy round next).
 2. The open heavy and native items above, as one round per team when the user charters them.
-3. Cross-platform reproducibility for native runs (question 258), after the RHEL 7 round.
+3. Cross-platform reproducibility for native runs (question 258): measured (14 of 14 hashes equal across macOS and Linux arm64 with the portable `libm`), adoption round running.
 4. Hardware in the loop, when the user resumes it.
