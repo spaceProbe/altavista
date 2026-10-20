@@ -78,16 +78,19 @@ def test_the_record_says_the_kit_does_not_carry_the_image_and_keeps_the_licence_
 
 
 def test_the_kit_does_not_carry_the_clickhouse_image():
-    """Question 247: the ClickHouse image is held out of the air-gap kit pending the user's licence
-    review. Putting it back into either table is a deliberate change that needs the user's ruling:
-    update this test and `services/clickhouse/IMAGE_DIGEST.md` in the same change."""
+    """Question 260 (closing 247): ClickHouse is an optional operator-supplied image. The kit redistributes no
+    GPL or LGPL code (question 251) and the server binary statically links LGPL libraries, so the kit never
+    carries the image or any part of it, declared or not. Putting it into either table is a deliberate
+    change that needs the user's ruling: update this test and `services/clickhouse/IMAGE_DIGEST.md` in the
+    same change. (`tests/test_kit_operator_supplied.py` builds kits, with and without the declaration, and
+    checks their tree.)"""
     assert "clickhouse-image" not in build_kit.IMAGE_DIGEST_SOURCES, (
-        "question 247: the ClickHouse image is held out of the kit pending the user's licence review"
+        "question 260: the kit never carries the ClickHouse image (operator-supplied)"
     )
     assert "clickhouse-image" not in sbom.IMAGE_COMPONENTS, (
-        "question 247: the ClickHouse image is held out of the kit pending the user's licence review"
+        "question 260: the kit never carries the ClickHouse image (operator-supplied)"
     )
-    assert "clickhouse-image" not in sbom.all_component_names(), "question 247: held out of the kit"
+    assert "clickhouse-image" not in sbom.all_component_names(), "question 260: operator-supplied, not in the kit"
 
 
 def test_extract_image_packages_keeps_only_installed_packages_and_is_deterministic():

@@ -208,6 +208,11 @@ class FakeDocker:
         self.image_config: dict[str, dict] = {}
         self.rmi_rc = 0
         self.n = 0
+        #: `docker image ls --digests` rows of other repositories on the host ({Repository, Tag, ID, Digest}),
+        #: answered per repository (question 260: the optional ClickHouse image's repository listing)
+        self.listing_rows: list[dict] = []
+        self.listing_rc = 0
+        self.listing_stdout: bytes | None = None   # overrides the rows (an unreadable answer)
 
     # -- helpers
     def called(self, *prefix: str) -> list[list]:
@@ -227,6 +232,13 @@ class FakeDocker:
             return self._ok("29.0.0\n") if self.version_rc == 0 else self._err("Cannot connect to the Docker daemon", self.version_rc)
         if args[:2] == ["image", "inspect"]:
             return self._inspect(args)
+        if args[:2] == ["image", "ls"] and "--digests" in args:
+            if self.listing_rc:
+                return self._err("Cannot connect to the Docker daemon", self.listing_rc)
+            if self.listing_stdout is not None:
+                return self._ok(self.listing_stdout)
+            rows = [r for r in self.listing_rows if r["Repository"] == args[-1]]
+            return self._ok("".join(json.dumps(r) + "\n" for r in rows))
         if args[:2] == ["image", "ls"]:
             if "--filter" in args:
                 return self._ok("".join(f"<none>\t<none>\t{i}\n" for i in self.dangling))
