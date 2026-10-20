@@ -435,9 +435,10 @@ wheel when `wheels.operator_supplied` names it, a service image only when
     .venv/bin/python scripts/kit/build_kit.py --out DIR --declare-operator-supplied versitygw --declare-operator-supplied postgis
 
 for a site that deploys the heavy track (default: empty). The builder refuses a name that is not a service
-image in the pins file, a base or GMAT (those follow from what the kit carries), and `clickhouse`, which
-is held out of the kit pending the user's licence review (question 247); the installer refuses a
-manifest that declares any of them.
+image in the pins file, and a base or GMAT (those follow from what the kit carries); the installer refuses
+a manifest that declares any of them. `clickhouse` can be declared too
+(`--declare-operator-supplied clickhouse`), which makes it required like Versity Gateway; left undeclared it
+is optional (question 260, "ClickHouse and `--moe-store`" below).
 
 **Two steps, one list.** The files install never holds the Docker socket, so it cannot look at an image,
 and the host-side image step reads no tree. Each prints the whole list, one line per component, always
@@ -446,7 +447,7 @@ all seven, in item order (the examples are a selection):
     operator-supplied: ubuntu-22.04-base-image  required (base of cfs-image)  verified sha256:2edbbc5dc405… via Id
     operator-supplied: gmat-r2026a  required (packs.gmat)  verified macos-arm64 sha256:d21cddbbffbd… 2060 files
     operator-supplied: versitygw  required (declared at build time: --declare-operator-supplied versitygw)  verified by the image step, not here (record: IMAGE_BUILD_RECORD operator_supplied; this step does not read it)
-    operator-supplied: clickhouse  outside the kit, not verified (not declared; held pending licence review, q247)
+    operator-supplied: clickhouse  optional (question 260: enables the ClickHouse MoE (sweep study) store; the file store otherwise)  checked by the image step, not here (record: IMAGE_BUILD_RECORD moe_store; this step does not read it)
     operator-supplied: postgis  outside the kit, not verified (not declared; a site that deploys it builds the kit with --declare-operator-supplied postgis)
     operator-supplied: debian-bookworm-slim-base-image  not required (the kit carries no application layer for edge-plugin-image), not verified
     operator-supplied: numpy-wheel-linux-aarch64  not required (no wheel of the kit bundles a GPL-family library), not verified
@@ -470,6 +471,55 @@ reports the pinned digest as its `Id` or in `RepoDigests`; absent or different i
 a declared service image, each naming reference and digest. Nothing is pulled or loaded. Each component's
 check is one function returning a typed result (`operator_check.Verification`: found, expected,
 verified, reason, code), and the step turns an unverified result into its own refusal.
+
+### ClickHouse and `--moe-store` (question 260)
+
+ClickHouse (item 4) is operator-supplied and OPTIONAL. Its server binary statically links LGPL libraries
+and the kit redistributes no GPL or LGPL code (question 251), so the kit never carries the image or any
+part of it, whatever the options. The operator obtains the pinned image
+(`clickhouse/clickhouse-server@sha256:6ded2b2c2f2c46f12784bd8000c75f8aa7363372ed64afccaa932456b8cb41e4`,
+26.8.29.10 LTS) and loads it on the Docker host. Question 260 closes question 247 without a licence review;
+the operator's use of ClickHouse is under its own licences. Only the host-side image step can look for it
+(the files install has no Docker socket); the files install lists it as `checked by the image step, not
+here` and records the file store with ClickHouse not configured by that step
+(`INSTALL_RECORD.installed.moe_store`).
+
+    install.sh --build-images <kit> [--moe-store auto|file|clickhouse]
+
+`--moe-store` defaults to `auto`. The outcomes (the table in `operator_check.py`'s module doc, in the
+refusals' own names):
+
+| `--moe-store` | pinned image on the host | another ClickHouse image | no ClickHouse image |
+|---|---|---|---|
+| `auto` (kit does not declare it) | `verified`, MoE store `clickhouse` | refused `operator-image-digest-differs`, naming `--moe-store file` | `not configured`, MoE store `file`, how to add it, exit 0 |
+| `file` | `not selected` (found recorded), store `file` | `not selected` (found recorded), store `file` | `not selected`, store `file` |
+| `clickhouse` (or the kit declares it) | `verified`, store `clickhouse` | refused `operator-image-digest-differs` | refused `operator-image-missing` |
+
+A lookup that fails (`docker image ls` or the inspect output unreadable) is refused
+`operator-image-lookup-failed` under every value and is never read as "absent". `--moe-store file` on a kit
+that declares ClickHouse is refused `moe-store-contradiction` before any docker call. Nothing is pulled,
+loaded or removed for it, ever.
+
+To add it: on a connected machine `docker pull` the digest and `docker save` it to a tarball, carry the
+tarball across the gap, `docker load -i` it on the Docker host, and re-run `install.sh --build-images <kit>`.
+Real lines (the fake Docker host of `tests/test_kit_operator_supplied.py`; digests are shortened in the
+printed line):
+
+    operator-supplied: clickhouse  optional (question 260: enables the ClickHouse MoE (sweep study) store; the file store otherwise)  verified sha256:6ded2b2c2f2c… via Id
+    MoE store: clickhouse (clickhouse/clickhouse-server@sha256:6ded2b2c2f2c… verified via Id)
+
+    operator-supplied: clickhouse  optional (question 260: enables the ClickHouse MoE (sweep study) store; the file store otherwise)  not configured (not on this Docker host; the MoE store is the file store). To add it: load an image saved from exactly clickhouse/clickhouse-server@sha256:6ded2b2c2f2c46f12784bd8000c75f8aa7363372ed64afccaa932456b8cb41e4 (`docker load -i <tarball>`; on a connected machine: `docker pull clickhouse/clickhouse-server@sha256:6ded2b2c2f2c46f12784bd8000c75f8aa7363372ed64afccaa932456b8cb41e4` then `docker save clickhouse/clickhouse-server@sha256:6ded2b2c2f2c46f12784bd8000c75f8aa7363372ed64afccaa932456b8cb41e4 -o clickhouse.tar`), then re-run `install.sh --build-images <kit>`
+    MoE store: file -- ClickHouse is not configured: not on this Docker host. To add it: (the same text)
+
+    operator-supplied: clickhouse  optional (question 260: enables the ClickHouse MoE (sweep study) store; the file store otherwise)  NOT VERIFIED [image-digest-differs]
+    install.sh --build-images: REFUSED [operator-image-digest-differs] -- this Docker host holds a ClickHouse image that is not the pinned clickhouse/clickhouse-server@sha256:6ded2b2c2f2c46f12784bd8000c75f8aa7363372ed64afccaa932456b8cb41e4 (expected digest sha256:6ded2b2c2f2c46f12784bd8000c75f8aa7363372ed64afccaa932456b8cb41e4): clickhouse/clickhouse-server:25.3.1.1 id sha256:aaaa[...] digest sha256:bbbb[...]. Nothing was enabled and nothing was pulled. To use ClickHouse, (the same "load an image saved from exactly ..." text). To go on without ClickHouse and leave that image alone, pass --moe-store file (the MoE store is then the file store and the image is recorded as found).
+
+(In the last example the test's fake image id and digest are cut at `[...]`.) The selection is
+recorded in `IMAGE_BUILD_RECORD.moe_store` (`mode`, `store`, and what was found about ClickHouse). It is not
+used by anything yet: the kit carries no `av-sweep`, `av-sweep` selects its store by its own flags
+(`--store-dir`, `--store-clickhouse`), and nothing in the installed system reads the recorded selection. In
+this document "selected" and "enabled" mean recorded; a consumer of the selection is open. Question 6's
+Redpanda review is unaffected.
 
 ## Native libraries inside wheels (question 250(a))
 

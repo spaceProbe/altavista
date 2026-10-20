@@ -6,13 +6,18 @@ on 2026-10-17 (heavy-ct round 1a). Question 154: the pull is the one-time setup 
 pulls. Question 212(a): every image a test depends on records its digest here, and the test
 compares the RUNNING image to this record before it trusts it.
 
-**The air-gap kit does NOT carry this image** (question 247): the user holds it out of the kit
-pending a licence review of the statically linked LGPL libraries in its binary (see "Licence",
-below). The kit's image components are `edge-plugin-image` and `cfs-image` only. This record, the
-package inventory (`IMAGE_PACKAGES.txt`) and the licence section are kept as the input for that
-review, and for the pin the dev and test paths use. Nothing in `scripts/kit/` reads this file;
-`tests/test_clickhouse_image_record.py` fails if the kit starts to, so a re-inclusion is a
-deliberate change.
+**The air-gap kit does NOT carry this image** (questions 247, 251, 260). It is an optional
+operator-supplied image (question 260, which closes question 247 without a licence review): the
+`clickhouse` binary statically links LGPL libraries (see "Licence", below) and the kit redistributes no
+GPL or LGPL code (question 251), so the kit never carries the image or any part of it. The operator
+obtains the digest recorded here and loads it on the Docker host (`docker save` on a connected machine,
+`docker load -i` there); the installer's image step (`install.sh --build-images <kit> [--moe-store
+auto|file|clickhouse]`) verifies it by digest and records the MoE store it selects in
+`IMAGE_BUILD_RECORD.moe_store`. Nothing in the installed system reads that selection yet. The kit's image
+components are `edge-plugin-image` and `cfs-image` only. This record, the package inventory
+(`IMAGE_PACKAGES.txt`) and the licence section stay as the pin for the dev and test paths and as the
+operator's reference; `scripts/kit/operator_supplied.json` pins the same digest and
+`tests/test_kit_operator_supplied.py` fails if the two differ.
 
 ## Image
 
@@ -46,42 +51,43 @@ sha256:6ded2b2c2f2c46f12784bd8000c75f8aa7363372ed64afccaa932456b8cb41e4
   (`docker image inspect .Size`); about 1.13 GB unpacked (`docker image ls`); a `docker save`
   tarball is 266,032,128 bytes.
 
-### Kit tag (what a future kit inclusion would need; not wired today)
+### Saving and loading it (for the operator; the kit never carries it)
 
-The kit does not carry this image (question 247, above). Measured in round 1a, while the kit did
-carry it, and kept here for whoever re-includes it after the licence review:
+The kit will never carry this image (questions 251 and 260, above). What follows was measured in
+round 1a, while the kit did carry it, and is kept as what an operator needs to save the image on a
+connected machine and load it on the Docker host:
 
-`scripts/kit/build_kit.py --with-images` saves, and the installer's loaders load, images by
-`repository:tag`, as for the other two kit images. A host that pulled by digest has no tag, so a
-kit build would need one local alias, added once after the pull:
+`docker save` and `docker load` work on `repository:tag` names. A host that pulled by digest has no tag,
+so the operator adds one local alias once after the pull (the image step looks the image up by its
+digest, not by the alias):
 
 ```
 docker tag clickhouse/clickhouse-server@sha256:6ded2b2c2f2c46f12784bd8000c75f8aa7363372ed64afccaa932456b8cb41e4 clickhouse/clickhouse-server:26.8.29.10
 ```
 
-The alias would be trusted for nothing: the save step has to compare the alias's id to the record
-above before it runs `docker save`, and refuse on a mismatch. Tests run the digest reference, never
-the alias. (Measured: a tarball saved from the alias carries `RepoTags` = the alias; one saved from
-the bare digest reference carries none, which `scripts/kit/docker_image_tags.py` cannot find after a
-load.) The tarball measured then was 266,032,128 bytes, sha256
+The alias is trusted for nothing: compare its id to the record above before `docker save`, and do not
+save on a mismatch. The image step does the same on the Docker host: it accepts the image only when
+`docker image inspect` reports the pinned digest as its `Id` or in `RepoDigests`. Tests run the digest
+reference, never the alias. (Measured: a tarball saved from the alias carries `RepoTags` = the alias;
+one saved from the bare digest reference carries none, which `scripts/kit/docker_image_tags.py` cannot
+find after a load.) The tarball measured then was 266,032,128 bytes, sha256
 `855c07bd1f42efcdadd0f2eb42485d7790b26da17d98540195e1f60c6ad568f6`, identical across independent
 `docker save`s (measured four times, including the opt-in two-kit reproducibility test).
 
 **Do not `docker rmi` the alias.** Measured on this host: on a host that holds the image, `docker
 rmi clickhouse/clickhouse-server:26.8.29.10` prints `Untagged` and `Deleted: sha256:6ded...` and
-removes the image itself; the digest reference is not a second name that survives it. The
-zero-egress install test only removes a binding its own `docker load` created, so on a host that
-had the alias before the load it changes nothing, and on an air-gapped host that has never seen the
-image it loads, verifies by id, and removes it (both measured through `ImageTagGuard`). A host that
-pulled by digest and skipped the `docker tag` would instead have the guard delete the pulled image
-after the load, so the `docker tag` line in Setup stays: it also protects the local copy. `docker
-load -i` of the saved tarball restored the image and the alias with no network (measured: same id,
-the digest reference resolves again).
+removes the image itself; the digest reference is not a second name that survives it. (Measured
+while the kit carried the image: the zero-egress install test removed only a binding its own `docker
+load` created, through `ImageTagGuard`; a host that pulled by digest and skipped the `docker tag` would
+have had the guard delete the pulled image after the load. The kit no longer loads this image; the
+`docker tag` line in Setup stays because it also protects the local copy.) `docker load -i` of the saved
+tarball restored the image and the alias with no network (measured: same id, the digest reference
+resolves again), which is what an operator does on the Docker host.
 
-A future inclusion would need: a `clickhouse-image` entry in `scripts/kit/build_kit.py`'s
-`IMAGE_DIGEST_SOURCES` and `scripts/kit/sbom.py`'s `IMAGE_COMPONENTS` (with its epoch paths, this
-file and `IMAGE_PACKAGES.txt`), an SBOM built from the pin and the inventory, and the user's
-licence ruling. Commit `cac4699` is the removed wiring.
+The kit has no `clickhouse-image` entry in `scripts/kit/build_kit.py`'s `IMAGE_DIGEST_SOURCES` or
+`scripts/kit/sbom.py`'s `IMAGE_COMPONENTS`, and no SBOM is built from the pin and the inventory; commit
+`cac4699` is the removed wiring, and `tests/test_clickhouse_image_record.py` fails if it comes back.
+Putting the image into the kit would contradict question 251 and needs the user's ruling.
 
 ## Measured inside the running container (2026-10-17)
 
@@ -155,7 +161,7 @@ native-protocol client; drop it if the store speaks HTTP alone. Compare
 ## Setup, once per host (question 154: the only network use)
 
 Both lines are required (see "Do not `docker rmi` the alias", above; the alias is for local
-copy safety and for a future kit inclusion, since the kit does not carry the image):
+copy safety and for `docker save`, since the kit does not carry the image):
 
 ```
 docker pull clickhouse/clickhouse-server@sha256:6ded2b2c2f2c46f12784bd8000c75f8aa7363372ed64afccaa932456b8cb41e4
@@ -170,9 +176,9 @@ change.
 ## Package inventory
 
 `services/clickhouse/IMAGE_PACKAGES.txt` lists the 111 dpkg packages (name, version, architecture)
-read from the image's `/var/lib/dpkg/status` with no network. It is kept as input for the licence
-review (question 247); no SBOM is generated from it today (an earlier kit SBOM, `cac4699`, was
-removed with the kit wiring). Regenerate it with `services/clickhouse/extract_image_packages.py`
+read from the image's `/var/lib/dpkg/status` with no network. It is kept as the operator's reference
+for what the image holds (question 260); no SBOM is generated from it (an earlier kit SBOM, `cac4699`,
+was removed with the kit wiring, and the kit does not carry the image). Regenerate it with `services/clickhouse/extract_image_packages.py`
 (its header gives the commands). The upstream index also carries a buildx SPDX SBOM and SLSA
 provenance attestation for the arm64 image (attestation manifest
 `sha256:e6ce34315d22e655c850fecc7229c822028a111dcd2d6c36c0225175ed22e89c`, SPDX blob about
@@ -204,6 +210,7 @@ provenance attestation for the arm64 image (attestation manifest
   LGPL-2.1-or-later` for `r-efi`/`r-efi-alloc`; MPL-2.0 for `cbindgen`, `defer-drop`,
   `fortanix-sgx-abi`, `shuffling-allocator`, `timer` and `webpki-roots`; one each of OpenLDAP and
   PostgreSQL. They are upstream's own distribution choices, listed here because shipping the
-  image in an enclave kit would redistribute it. **Question 247: the user holds the image out of the
-  kit pending a licence review (notices and any GPL/LGPL source-offer terms) of these statically
-  linked libraries. This section and the package inventory are the review's input.**
+  image in an enclave kit would redistribute it. **Question 260 (closing question 247): the kit
+  redistributes no GPL or LGPL code (question 251), so it never carries the image; the operator
+  obtains it from upstream and uses it under its licences, and no licence review is open for it.
+  This section and the package inventory are the operator's reference.**

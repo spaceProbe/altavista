@@ -1,11 +1,12 @@
-"""Question 245 (heavy-ct round 1a) and question 247: the pinned ClickHouse server image's record
-(`services/clickhouse/IMAGE_DIGEST.md`, `IMAGE_PACKAGES.txt`), and the ruling that the air-gap kit
+"""Question 245 (heavy-ct round 1a), question 247 and question 260: the pinned ClickHouse server image's
+record (`services/clickhouse/IMAGE_DIGEST.md`, `IMAGE_PACKAGES.txt`), and the ruling that the air-gap kit
 does NOT carry the image.
 
-Question 247: the user holds the ClickHouse image out of the kit pending a licence review of the
-statically linked LGPL libraries in its binary. The record, the package inventory and the licence
-section stay as input for that review; the kit's image components are `edge-plugin-image` and
-`cfs-image` only.
+Question 260 (closing question 247 without a licence review): ClickHouse is an optional operator-supplied
+image. Its binary statically links LGPL libraries and the kit redistributes no GPL or LGPL code (question
+251), so the kit never carries it; the operator loads the pinned digest on the Docker host and the installer's
+image step verifies it. The record, the package inventory and the licence section stay as the pin and the
+operator's reference; the kit's image components are `edge-plugin-image` and `cfs-image` only.
 
 Everything here reads committed files; nothing touches Docker, git history or the network.
 """
@@ -70,8 +71,11 @@ def test_the_record_is_pinned_by_digest_and_internally_consistent():
 
 def test_the_record_says_the_kit_does_not_carry_the_image_and_keeps_the_licence_inventory():
     text = DIGEST_MD.read_text()
-    assert "does NOT carry this image" in text and "question 247" in text.lower()
-    # The licence review's input stays: the section and the statically linked LGPL libraries.
+    assert "does NOT carry this image" in text and "question 260" in text.lower()
+    assert "operator-supplied" in text and "IMAGE_BUILD_RECORD.moe_store" in text
+    # No licence review is held open for it any more: question 247 is closed by 260.
+    assert "pending a licence review" not in text and "the user holds" not in text.lower()
+    # The licence inventory stays as the operator's reference: the section and the statically linked LGPL libraries.
     assert "## Licence" in text and "## Package inventory" in text
     for library in ("lemmagen-c", "libgsasl", "libssh", "mariadb-connector-c", "numactl", "xz"):
         assert f"`{library}`" in text, library
