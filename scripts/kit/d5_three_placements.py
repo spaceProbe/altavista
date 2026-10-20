@@ -347,7 +347,8 @@ def _down() -> None:
     label_filter = f"label={TEST_LABEL_KEY}={TEST_LABEL_VALUE}"
     containers = _docker("ps", "-a", "--filter", label_filter, "-q", check=False).stdout.split()
     for cid in containers:
-        _docker("rm", "-f", cid, check=False)
+        # `-v`: av-ingest declares VOLUME /var/lib/av-ingest (the run bind-mounts over it, but an image can gain more).
+        _docker("rm", "-f", "-v", cid, check=False)
         print(f"[d5] removed container {cid}", file=sys.stderr)
     prune_stale_labelled_resources()  # sweeps any labelled network/volume too (none expected -- see this module's own "--network host" doc section).
     print("[d5] teardown complete", file=sys.stderr)
