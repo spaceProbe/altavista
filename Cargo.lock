@@ -157,6 +157,7 @@ name = "av-dynamics"
 version = "0.1.0"
 dependencies = [
  "av-cdm",
+ "libm",
  "openssl",
 ]
 

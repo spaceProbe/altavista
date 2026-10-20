@@ -16,3 +16,9 @@ av-cdm = { path = "../av-cdm" }
 # SHA-256 only, through the system OpenSSL only, with no carve-out for a non-security-critical
 # fingerprint like this one.
 openssl = "0.10"
+# Question 258: the pure-Rust libm behind `av_dynamics::math`, the one module every transcendental
+# call on the native run path goes through, so a native run's bits do not depend on the platform's
+# libm (question 248). MIT; already in the lockfile through `num-traits`, so no new fetch.
+# Default features (`arch`) only route `sqrt`/`fma`/`rint` to hardware instructions, all exact or
+# correctly rounded.
+libm = "0.2.16"
