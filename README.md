@@ -368,6 +368,12 @@ checks (question 235).
 The unit tests cover script preparation and the JSON model and do not need GMAT.
 The examples double as integration tests against the real GMAT install.
 
+`tests/test_viewer_basemap_orientation_browser.py` is opt-in by what is installed: with Chrome,
+`djpeg`, the real Blue Marble pyramid and the NASA original it was built from (default paths under
+`~/altavista-data/imagery/`; `AV_BASEMAP_DIR` / `AV_BASEMAP_ORIGINAL` move them) it measures, in a
+real browser, that the 2D map, the tiled globe and the plain body draw the original at the right
+latitudes and longitudes; otherwise it skips with the reason (`-rs`). Its docstring says how.
+
 ## Notes and limitations
 
 * API-built mission sequences (`gmat.Command(...)` + `gmat.Execute()`) do not deliver data to

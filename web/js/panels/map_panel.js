@@ -24,8 +24,11 @@ import { basemapNotice } from '../imagery_status.js';
  * the NORTHERNMOST row. `globe_lod.js`'s own tile addressing has y=0 at the SOUTH edge
  * (`tileBoundsDeg`: `south = -90 + tile.y * dLat`) -- the same convention the tile
  * fixture generator (`web/fixtures/gen_globe_tiles.py`) and the 3D globe's own UV
- * mapping (`web/js/globe.js`'s `buildTileMesh`, `uvs[ui+1] = 1 - j/segments`) both
- * already flip for exactly this reason: a raster image reads top-to-bottom as
+ * mapping (`web/js/globe.js`'s `buildTileMesh`, `uvs[ui+1] = 1 - j/segments`, with its
+ * textures uploaded unflipped by `applyTileTexture`) both flip for exactly this reason
+ * (the globe only since question 264 measured it; tests/
+ * test_viewer_basemap_orientation_browser.py checks both against the NASA original): a
+ * raster image reads top-to-bottom as
  * north-to-south, but this tiling scheme addresses bottom-to-top. Flipping the ROW
  * order here (once, explicitly) rather than leaving it to CSS is what makes a visual
  * inspection of the mosaic (the browser check) match a real map, not a mirrored one.

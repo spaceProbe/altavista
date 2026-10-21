@@ -62,7 +62,17 @@ import { TerrainLayerAdapter } from './layers/terrain_layer.js';
 import { globalKeyFor } from './layers/layer.js';
 
 const DEFAULT_IMAGERY_URL = './fixtures/tiles/{z}/{x}/{y}.png';
-const DEFAULT_SEGMENTS = 8; // quads per tile edge
+// Quads per tile edge. A tile mesh is a flat-faced polygon, so its quad must stay small in
+// ANGLE, not in count: a level-L tile spans 180 / 2**L degrees, and a fixed 8 quads made the
+// level-0 globe a 22.5-degree-faceted silhouette (about 120 km of sagitta, a visibly polygonal
+// Earth under a real basemap; measured, question 264). Halving the segment count with each
+// level holds the facet at about 2.8 degrees (about 2 km of sagitta) down to 8 segments, which
+// is finer still from level 3 on. `opts.segments` still forces one fixed count.
+const MIN_SEGMENTS = 8;
+const LEVEL0_SEGMENTS = 64; // 180 degrees / 64 = 2.8 degrees per quad
+function segmentsForLevel(level) {
+  return Math.max(MIN_SEGMENTS, LEVEL0_SEGMENTS >> Math.min(level, 31));
+}
 
 /** WGS84 outward surface normal at ECEF point (x,y,z) -- `grad(x^2/a^2+y^2/a^2+z^2/b^2)`,
  * normalized. Not the same as `normalize(position)` once flattening is nonzero
@@ -103,6 +113,15 @@ export function urlForTile(template, tile) {
  * independently-written copies of "how a loaded texture becomes visible".
  */
 function applyTileTexture(mesh, tex) {
+  // One orientation contract for every imagery source: tile images are north-up (the first
+  // image row is the tile's northern edge) and `buildTileMesh` gives the southern edge v = 1,
+  // which is upright only for a texture uploaded WITHOUT a vertical flip (first row = v 0). A
+  // `THREE.TextureLoader` texture (an HTMLImageElement) defaults to `flipY = true`, which WebGL
+  // honours: every tile was drawn upside down (north-south flipped; measured, question 264). An
+  // `ImageBitmap` texture (`decodeTileBytesToTexture`, the gateway path) ignores `flipY`, so it
+  // was already upright. Setting false here, the one place every texture passes through, makes
+  // the two agree; it is set before the texture is first used, so it applies at the first upload.
+  tex.flipY = false;
   tex.colorSpace = THREE.SRGBColorSpace;
   mesh.material.map = tex;
   mesh.material.color.set(0xffffff);
@@ -110,7 +129,7 @@ function applyTileTexture(mesh, tex) {
   mesh.userData.imageryLoaded = true;
 }
 
-function buildTileMesh(tile, imageryUrl, textureLoader, segments = DEFAULT_SEGMENTS, skipDirectLoad = false) {
+function buildTileMesh(tile, imageryUrl, textureLoader, segments = segmentsForLevel(tile.level), skipDirectLoad = false) {
   const n = segments + 1;
   // The exact vertex-position math scene_jitter_harness.mjs's
   // measureRpoWithGlobePresent() also calls (see globe_lod.js's docstring) -- f64
@@ -139,9 +158,14 @@ function buildTileMesh(tile, imageryUrl, textureLoader, segments = DEFAULT_SEGME
   let idx = 0;
   for (let j = 0; j < segments; j++) {
     for (let i = 0; i < segments; i++) {
+      // a = (i, j) south-west, b = south-east, c = north-west, d = north-east of this quad
+      // (i counts east, j counts north). Counter-clockwise seen from OUTSIDE the globe, which
+      // is what three.js treats as the front face: the order (a, c, b), (b, c, d) used before
+      // was clockwise from outside, so the near hemisphere was culled and the far hemisphere's
+      // INSIDE was drawn instead (question 264, tests/test_viewer_basemap_orientation_browser.py).
       const a = j * n + i, b = a + 1, c = a + n, d = c + 1;
-      indices[idx++] = a; indices[idx++] = c; indices[idx++] = b;
-      indices[idx++] = b; indices[idx++] = c; indices[idx++] = d;
+      indices[idx++] = a; indices[idx++] = b; indices[idx++] = c;
+      indices[idx++] = b; indices[idx++] = d; indices[idx++] = c;
     }
   }
   const geometry = new THREE.BufferGeometry();
@@ -196,7 +220,7 @@ export class GlobeLayer {
     this.sseThreshold = opts.sseThreshold ?? 24;
     this.maxLevel = opts.maxLevel ?? 2;      // kept low by default -- matches the small offline fixture pyramid (web/fixtures/gen_globe_tiles.py); a real tile gateway would raise this.
     this.maxTiles = opts.maxTiles ?? 128;
-    this.segments = opts.segments ?? DEFAULT_SEGMENTS;
+    this.segments = opts.segments ?? null; // null: segmentsForLevel(tile.level), see above
     this.group = new THREE.Group();
     this.group.name = 'globe-layer';
     this.scheduler = new TileLoadScheduler({ residentBudget: opts.residentBudget ?? 64 });
@@ -405,7 +429,7 @@ export class GlobeLayer {
         // `skipDirectLoad` (last arg) -- see `buildTileMesh`'s own comment -- true
         // only in `layerManager` mode: the texture arrives through the manager's
         // own admitted load instead (applied just below, once genuinely resident).
-        const mesh = buildTileMesh(tile, this.imageryUrl, this.textureLoader, this.segments, !!this.layerManager);
+        const mesh = buildTileMesh(tile, this.imageryUrl, this.textureLoader, this.segments ?? segmentsForLevel(tile.level), !!this.layerManager);
         this._meshes.set(k, mesh);
         this.group.add(mesh);
       }

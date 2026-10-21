@@ -1439,7 +1439,7 @@ exports `TileLoadScheduler` exactly as before, so `web/js/globe_lod_check.mjs` a
   `LayerManager`'s interface at all.
 - **Terrain mesh byte cost** (`TerrainLayerAdapter.TERRAIN_MESH_BYTES`, 1,944 bytes)
   is likewise a documented estimate (a `(8+1)^2` vertex grid, position+normal, f32 --
-  `web/js/globe.js`'s own `DEFAULT_SEGMENTS`), not a measurement, since there is no
+  `web/js/globe.js`'s own `MIN_SEGMENTS`, the grid at its deeper levels), not a measurement, since there is no
   real terrain mesh to measure (see above).
 
 **Proof**: `web/js/layers_check.mjs` (a headless `node` CLI harness, no network I/O

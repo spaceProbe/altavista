@@ -371,7 +371,12 @@ const stubTextureLoader = { load() {} };
 /** Enable the globe on `bodyName` with a texture loader that never answers (the tiles keep their
  * flat colour; the vertices are what is measured). */
 export function enableGlobeForMeasurement(viewer, bodyName) {
-  const ok = viewer.enableGlobe(bodyName, { textureLoader: stubTextureLoader });
+  // `segments: 8` pins the tile geometry the numbers in fixtures/bodies_viewport_precision_before_primary.json
+  // were measured on. The globe's own default (question 264) is finer at the shallow levels
+  // (`segmentsForLevel` in globe.js: about 2.8-degree facets instead of 22.5), which changes WHICH
+  // vertices lie nearest the camera, so the pinned "globe" class would no longer compare like with
+  // like; what this check measures is float32 placement of a vertex, which does not depend on it.
+  const ok = viewer.enableGlobe(bodyName, { textureLoader: stubTextureLoader, segments: 8 });
   disableBodyCulling(viewer);
   return ok;
 }

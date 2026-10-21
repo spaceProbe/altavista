@@ -27,9 +27,9 @@ import { screenSpaceErrorPx, dist, tileBoundingSphere, tileKey } from '../globe_
  * terrain imagery in this codebase, see this file's module docstring). Documented
  * assumption, same spirit as `imagery_layer.js`'s `IMAGERY_TILE_BYTES`: an honest,
  * disclosed estimate, not a measurement from a real terrain payload (there is none to
- * measure). `DEFAULT_SEGMENTS` mirrors `web/js/globe.js`'s own tile mesh segment
- * count so the estimate is at least consistent with this codebase's one existing
- * mesh-building convention.
+ * measure). `DEFAULT_SEGMENTS` is `web/js/globe.js`'s tile mesh segment count at the
+ * deeper levels (its `MIN_SEGMENTS`; the shallow levels use more since question 264),
+ * kept at 8 so this estimate, and every byte budget built on it, does not move.
  */
 const DEFAULT_SEGMENTS = 8;
 const FLOATS_PER_VERTEX = 6; // position(3) + normal(3), f32

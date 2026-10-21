@@ -117,6 +117,7 @@ SCENE_JITTER_HARNESS = REPO_ROOT / "web" / "js" / "scene_jitter_harness.mjs"
 TILES3D_CHECK = REPO_ROOT / "web" / "js" / "tiles3d_check.mjs"
 TILES3D_GEO_CHECK = REPO_ROOT / "web" / "js" / "tiles3d_geo_check.mjs"
 GLOBE_IMAGERY_CHECK = REPO_ROOT / "web" / "js" / "globe_imagery_check.mjs"
+GLOBE_GEOMETRY_CHECK = REPO_ROOT / "web" / "js" / "globe_geometry_check.mjs"
 
 # Never loosened -- the same bound tests/test_viewer_jitter.py uses for the RPO scene
 # (docs/open-questions.md Q46's "centimetre stability in RIC").
@@ -581,3 +582,25 @@ def test_globe_imagery_report(globe_imagery_data, capsys):
         print(f"  default tiles requested: {d['defaultTileCount']}")
         print(f"  verbatimTemplateUsed={d['verbatimTemplateUsed']} "
               f"defaultProfileUsesTheOfflineFixture={d['defaultProfileUsesTheOfflineFixture']}")
+
+
+# ==================================================================================
+# Question 264: the real tile mesh faces outward, is upright, sits on its tile, is smooth
+# ==================================================================================
+
+def test_globe_tile_mesh_faces_outward_is_upright_sits_on_its_tile_and_is_smooth():
+    """`web/js/globe_geometry_check.mjs` builds the shipped ``GlobeLayer``'s real tile meshes
+    under node (no I/O) and asserts, for far, mid and LEO cameras: every triangle's winding is
+    counter-clockwise seen from outside the ellipsoid (a clockwise mesh draws the far hemisphere's
+    inside), the south edge carries v = 1 and the texture bound to it is uploaded unflipped (north-up
+    tile images upright), every vertex lies inside its tile's ``tileBoundsDeg``, and no quad spans
+    more than 3 degrees. The flat-colour fixture could never show any of this; the real-Chrome
+    proof is ``tests/test_viewer_basemap_orientation_browser.py``. The check also runs each
+    predicate against a deliberately wrong mesh (``BREAKS``) and requires it to say no."""
+    d = _run_node_json(GLOBE_GEOMETRY_CHECK, asserts_itself=True)
+    for name, cam in d["cameras"].items():
+        assert cam["meshes"] > 0, name
+        assert cam["worstOutwardFraction"] == 1, f"{name}: a tile triangle faces inward: {cam}"
+        assert cam["uvUpright"] is True and cam["allFlipYFalse"] is True, f"{name}: tiles are not upright: {cam}"
+        assert cam["onItsTile"] is True, f"{name}: a vertex lies off its tile: {cam}"
+        assert cam["maxFacetDeg"] <= 3.0, f"{name}: a quad spans {cam['maxFacetDeg']} degrees: {cam}"
