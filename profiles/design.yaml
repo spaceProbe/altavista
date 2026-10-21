@@ -15,19 +15,23 @@ rule: "Profiles select components; they never change numerical behaviour (ADR-00
 
 # The globe's imagery source (M19.5, question 132 -- decided by the lead, applying
 # question 11's rule to the globe: a profile selects *which* tile source the viewer
-# points at, never how the viewer behaves once it has one). Every profile defaults to
-# the same offline fixture (web/fixtures/gen_globe_tiles.py, generated and checked in --
-# tests/test_profiles.py pins this url_template against web/js/globe.js's own
-# DEFAULT_IMAGERY_URL constant, so the two never drift apart silently); which public and
-# restricted basemaps to ship per profile is a later user decision (question 132's own
-# text), not decided here. `max_level` is the selected source's own declared pyramid
-# depth (a property of the component, like a component's `path`), not a viewer LOD
-# behaviour knob -- screen-space-error threshold, tile budget and resident-cache size
-# stay hardcoded in web/js/globe.js, never profile-configurable.
+# points at, never how the viewer behaves once it has one). Question 264 answered the half
+# question 132 left open: every profile now points at the NASA Blue Marble: Next Generation
+# pyramid (scripts/imagery/build_blue_marble_tiles.py builds it once from the one NASA original;
+# `python -m altavista serve --imagery-dir DIR` serves it at /imagery/bluemarble/, default
+# ~/altavista-data/imagery/bluemarble). The pyramid is a fetched-once artefact, not in the
+# repository: when it is absent the server says so (a start-up WARNING, and the viewer shows a
+# notice instead of a basemap) rather than falling back to anything. The offline flat-colour
+# fixture (web/fixtures/gen_globe_tiles.py, ./fixtures/tiles/) is the TEST imagery only, carried
+# by tests/fixtures/profiles/ (tests/test_profiles.py pins it against web/js/globe.js's own
+# DEFAULT_IMAGERY_URL and pins these shipped profiles to /imagery/bluemarble/). `max_level`
+# is the selected source's own declared pyramid depth (a property of the component, like a
+# component's `path`), not a viewer LOD behaviour knob -- screen-space-error threshold, tile
+# budget and resident-cache size stay hardcoded in web/js/globe.js, never profile-configurable.
 imagery:
-  url_template: './fixtures/tiles/{z}/{x}/{y}.png'
-  attribution: 'Offline fixture tiles (web/fixtures/gen_globe_tiles.py) -- no public basemap wired yet (question 132)'
-  max_level: 2
+  url_template: './imagery/bluemarble/{z}/{x}/{y}.jpg'
+  attribution: 'Blue Marble: Next Generation (July 2004), NASA Earth Observatory'
+  max_level: 5
 
 # The one component every profile lists (question 85 / ADR-003's 2026-09-02 amendment): the
 # deployed Rust DynamicsService. Not a plane-specific selection -- it is the dynamics compute

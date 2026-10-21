@@ -248,6 +248,17 @@ sample is refused with a 403 that names the flag.
 A relative root is taken against the directory you start the server from. Publishing a sweep
 (`POST /api/cdm/sweep`) needs no root; only opening a sample does.
 
+**The Earth basemap (NASA Blue Marble).** The globe and the 2D map read a tile pyramid that is not in
+the repository: fetch the one NASA original once, then build the pyramid from it with
+`.venv/bin/python scripts/imagery/build_blue_marble_tiles.py --original <the original> --out <DIR>`
+(`--verify <DIR>` re-hashes it). The server serves `<DIR>` at `/imagery/bluemarble/`; the default
+`<DIR>` is `~/altavista-data/imagery/bluemarble`, or pass `--imagery-dir DIR`. It checks the folder
+once at start-up (`manifest.json`, every listed file present at its size) and says so: one WARNING
+when it is not installed, and the viewer then keeps the plain body and shows a notice naming the
+folder and the build command instead of requesting tiles that would all 404. `GET /api/health`
+reports the verdict. The tests never need it: they run on the flat-colour fixture profile in
+`tests/fixtures/profiles/`.
+
 Terminal 2 — publish a scenario:
 
 ```bash
@@ -341,6 +352,8 @@ and each point's distribution across draws. The worked example is
 
 Bodies are textured with the maps shipped in GMAT's `data/graphics/texture` and are
 oriented with GMAT's body-fixed frames (Earth rotation, lunar libration, IAU poles).
+Without GMAT's Earth texture, an installed Blue Marble pyramid supplies Earth's body image
+(`body/earth-2048x1024.jpg`); GMAT's own `ModifiedBlueMarble.jpg` is kept when present.
 
 ## Tests
 

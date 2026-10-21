@@ -16,11 +16,12 @@ rule: "Profiles select components; they never change numerical behaviour (ADR-00
 # The globe's imagery source (M19.5, question 132 -- decided by the lead, applying
 # question 11's rule: a profile selects *which* tile source the viewer points at, never
 # how the viewer behaves once it has one). See profiles/design.yaml's own imagery entry
-# for the full rationale; every profile defaults to the same offline fixture for now.
+# for the full rationale; every profile points at the NASA Blue Marble pyramid served at
+# /imagery/bluemarble/ (question 264).
 imagery:
-  url_template: './fixtures/tiles/{z}/{x}/{y}.png'
-  attribution: 'Offline fixture tiles (web/fixtures/gen_globe_tiles.py) -- no public basemap wired yet (question 132)'
-  max_level: 2
+  url_template: './imagery/bluemarble/{z}/{x}/{y}.jpg'
+  attribution: 'Blue Marble: Next Generation (July 2004), NASA Earth Observatory'
+  max_level: 5
 
 dynamics_backend:
   - name: av-dynamics-service

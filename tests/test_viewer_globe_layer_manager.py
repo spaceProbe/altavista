@@ -30,6 +30,7 @@ import os
 import shutil
 import subprocess
 import sys
+from fixture_profiles import FIXTURE_PROFILE_ARGS  # noqa: E402 -- test-only profile dir (question 264)
 import tempfile
 import time
 import urllib.request
@@ -92,7 +93,7 @@ def live_server():
     port = _free_port()
     env = dict(os.environ)
     proc = subprocess.Popen(
-        [sys.executable, "-m", "altavista", "serve", "--host", "127.0.0.1", "--port", str(port)],
+        [sys.executable, "-m", "altavista", "serve", *FIXTURE_PROFILE_ARGS, "--host", "127.0.0.1", "--port", str(port)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         cwd=str(REPO_ROOT),

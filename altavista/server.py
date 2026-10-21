@@ -30,6 +30,18 @@ POST /api/cdm/sweep/sample  open one already-run sample of a published sweep by 
                             (``--study-root``, see "Study roots" below; question 254)
 POST /api/clock             broadcast a playback clock to all browsers
 GET  /textures/{file}       planet textures from the GMAT install
+GET  /imagery/bluemarble/*  the Blue Marble tile pyramid ({z}/{x}/{y}.jpg, body/earth-2048x1024.jpg,
+                            manifest.json) from ``--imagery-dir`` (default
+                            ~/altavista-data/imagery/bluemarble); every profile's ``imagery:`` points
+                            here. Checked once at start-up (altavista.imagery_pyramid): when it is not
+                            installed the server logs one WARNING, ``scenario.imagery`` carries
+                            ``installed: false`` and a ``notice``, and the viewer keeps the plain body
+                            (question 264). If GMAT's Earth texture is absent too, Earth is published
+                            with the pyramid's own body/earth-2048x1024.jpg instead
+GET  /api/health            liveness and scenarios; ``textures`` is true only if the texture directory
+                            holds a file, ``earthTexture`` says whether GMAT's Earth image is there
+                            and which one is published (gmat, pyramid or none); ``imagery`` is the
+                            pyramid verdict
 WS   /ws                    push channel (scenario, list, clock messages)
 
 Command console (R3.5a, docs/aiplane-plan.md milestone A5's server half) -- every route
@@ -114,6 +126,7 @@ from google.protobuf.message import DecodeError
 from . import cdm as cdm_adapter
 from . import command_client
 from . import gateway_client
+from . import imagery_pyramid
 from . import profile as profile_loader
 from . import tiles_client
 from .model import Frame, ScenarioData
@@ -166,10 +179,23 @@ class RevalidatingStaticFiles(StaticFiles):
         return response
 
 
+class OptionalDirStaticFiles(RevalidatingStaticFiles):
+    """``RevalidatingStaticFiles`` for a directory that may not exist (the Blue Marble pyramid, question
+    264). ``check_dir=False`` only skips the check at construction; Starlette's ``StaticFiles`` repeats
+    it on the first request (``check_config``) and raises ``RuntimeError`` -- a 500 -- for a missing
+    directory. Skipping that second check lets every request under a missing directory fall through
+    ``lookup_path`` to the plain 404 it should be (found by test_imagery_serving.py)."""
+
+    async def check_config(self) -> None:
+        return None
+
+
 class Hub:
     """In-memory scenario store + WebSocket fan-out."""
 
-    def __init__(self, imagery: Optional[dict] = None, profile_id: Optional[str] = None) -> None:
+    def __init__(self, imagery: Optional[dict] = None, profile_id: Optional[str] = None,
+                 texture_dir: Optional[os.PathLike] = None,
+                 pyramid: Optional[imagery_pyramid.PyramidStatus] = None) -> None:
         self.scenarios: Dict[str, dict] = {}
         self.order: List[str] = []
         self.clients: Set[WebSocket] = set()
@@ -198,12 +224,66 @@ class Hub:
         # scenario with no `profileId` key degrades to its pre-existing, non-execution
         # behaviour rather than guessing (this task's own explicit rule).
         self.profile_id = profile_id
+        # Question 264, the plain body: `texture_dir` is where `/textures/<file>` is served from and
+        # `pyramid` the start-up verdict on the Blue Marble directory. put() uses the two to publish
+        # Earth with the pyramid's own whole-Earth image when GMAT's texture is not there. Both
+        # None (every Hub built directly by a test) leaves bodies exactly as published.
+        self.texture_dir = Path(texture_dir) if texture_dir is not None else None
+        self.pyramid = pyramid
+        self._plain_body_logged = False
+
+    def earth_texture_report(self) -> dict:
+        """What the server can actually serve for Earth's body, for ``GET /api/health``: the GMAT
+        texture file ``altavista.bodies`` names (``TEXTURES["Earth"]``) and whether it is in the
+        texture directory, and which texture ``put()`` will therefore publish -- ``"gmat"`` (that
+        file, kept), ``"pyramid"`` (the pyramid's whole-Earth image, see ``_plain_earth_texture``) or
+        ``"none"`` (the body stays a flat colour)."""
+        from .bodies import TEXTURES  # no GMAT needed to import it
+
+        name = TEXTURES["Earth"]
+        present = self.texture_dir is not None and (self.texture_dir / name).is_file()
+        pyramid = self.pyramid is not None and self.pyramid.installed and self.pyramid.has_body_texture
+        publishes = "gmat" if present else "pyramid" if pyramid else "none"
+        url = {"gmat": f"/textures/{name}", "pyramid": imagery_pyramid.BODY_URL, "none": None}[publishes]
+        return {"file": name, "present": present, "publishes": publishes, "url": url}
+
+    def _plain_earth_texture(self, body: dict) -> None:
+        """Question 264 (task 4): swap Earth's texture for the pyramid's `body/earth-2048x1024.jpg`
+        when it names a `/textures/<file>` that the texture directory does not have (GMAT absent, or
+        `--textures` pointing elsewhere) and the pyramid is installed, so Earth shows without GMAT
+        and without a 404. A texture that IS present (GMAT's `ModifiedBlueMarble.jpg`, the picture
+        this viewer mirrors) is left alone, and with neither present the body is left as published:
+        the browser's own texture-load failure keeps its flat colour, and the scenario's `imagery`
+        notice already says why the basemap is missing."""
+        if self.texture_dir is None or self.pyramid is None or not self.pyramid.installed:
+            return
+        if not self.pyramid.has_body_texture or body.get("name") != "Earth":
+            return
+        texture = body.get("texture")
+        prefix = "/textures/"
+        if not isinstance(texture, str) or not texture.startswith(prefix):
+            return
+        name = texture[len(prefix):]
+        try:
+            validate_path_component_id(name)
+        except PathIdError:
+            return
+        if (self.texture_dir / name).is_file():
+            return
+        body["texture"] = imagery_pyramid.BODY_URL
+        if not self._plain_body_logged:
+            self._plain_body_logged = True
+            log.info("Earth texture %s is not in %s; publishing Earth with %s from the Blue Marble pyramid instead",
+                     texture, self.texture_dir, imagery_pyramid.BODY_URL)
 
     # -- scenario store -------------------------------------------------
     def put(self, scenario: dict) -> str:
         name = str(scenario.get("name") or "scenario")
         if self.imagery is not None and "imagery" not in scenario:
             scenario["imagery"] = self.imagery
+        for body in scenario.get("bodies") or []:
+            if isinstance(body, dict):
+                self._plain_earth_texture(body)
         if self.profile_id is not None and "profileId" not in scenario:
             scenario["profileId"] = self.profile_id
         if name not in self.scenarios:
@@ -253,8 +333,20 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
                 tiles_token_path: Optional[os.PathLike] = None,
                 gateway_endpoint: Optional[str] = None,
                 gateway_token_path: Optional[os.PathLike] = None,
-                study_roots: Sequence[os.PathLike] = ()) -> FastAPI:
-    """``study_roots`` (question 254 item 1): the folders ``POST /api/cdm/sweep/sample`` may read
+                study_roots: Sequence[os.PathLike] = (),
+                imagery_dir: Optional[os.PathLike] = None) -> FastAPI:
+    """``imagery_dir`` (question 264): the Blue Marble tile pyramid directory
+    (``build_blue_marble_tiles.py --out``), served at ``/imagery/bluemarble/``; default
+    ``~/altavista-data/imagery/bluemarble``. Trusted configuration like ``study_roots``: never read
+    from the environment, never a request parameter. It is checked once, here
+    (``altavista.imagery_pyramid.check_pyramid``): not installed (missing, bad manifest, a listed file
+    missing or the wrong size) is one WARNING naming the directory and the build command, installed
+    one INFO with ``max_level``, ``tile_count`` and ``pyramid_sha256``. The verdict is stamped on
+    ``scenario["imagery"]`` as ``installed`` (and a ``notice`` when false) for a profile whose
+    ``url_template`` points at the pyramid, and shown by ``GET /api/health``. Hashing every file is
+    the generator's ``--verify``. Raises ``ValueError`` for an empty path.
+
+    ``study_roots`` (question 254 item 1): the folders ``POST /api/cdm/sweep/sample`` may read
     a sample's ``run_products.pb`` under (see the module docstring, "Study roots"). Trusted
     configuration, like ``command_endpoint`` below: never read from the environment, never a
     request parameter. Empty (the default) means the route refuses every sample with a 403. A
@@ -328,17 +420,32 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
         if not root.is_dir():
             log.warning("study root %s is not an existing directory; it admits no sweep sample until it is",
                         root)
-    hub = Hub(
-        imagery=profile_loader.load_imagery_config(profile, profiles_dir=profiles_dir),
-        profile_id=profile,
-    )
+    textures = Path(texture_dir) if texture_dir else _default_texture_dir()
+    if imagery_dir is not None and not os.fspath(imagery_dir):
+        raise ValueError("imagery_dir must not be an empty string")
+    imagery_path = Path(imagery_dir).expanduser().absolute() if imagery_dir is not None \
+        else imagery_pyramid.default_imagery_dir()
+    pyramid = imagery_pyramid.check_pyramid(imagery_path)
+    if pyramid.installed:
+        log.info("Blue Marble basemap installed at %s: max_level %d, %d tiles, pyramid_sha256 %s",
+                 imagery_path, pyramid.max_level, pyramid.tile_count, pyramid.pyramid_sha256)
+    else:
+        log.warning("%s", pyramid.notice)
+    app.state.imagery_pyramid = pyramid
+    imagery = profile_loader.load_imagery_config(profile, profiles_dir=profiles_dir)
+    if imagery_pyramid.template_uses_pyramid(imagery["urlTemplate"]):
+        # Only a source that points at the pyramid is judged by the pyramid's verdict (a fixture or
+        # third-party template is not); never stamped as a silent default, always visible.
+        imagery = {**imagery, "installed": pyramid.installed}
+        if not pyramid.installed:
+            imagery["notice"] = pyramid.notice
+    hub = Hub(imagery=imagery, profile_id=profile, texture_dir=textures, pyramid=pyramid)
     app.state.hub = hub
     command_config = command_client.CommandServiceConfig(
         grpc_endpoint=command_endpoint, admin_endpoint=command_admin_endpoint, entities=tuple(command_entities))
     tiles_config = tiles_client.TilesServiceConfig(endpoint=tiles_endpoint, token_path=tiles_token_path)
     gateway_config = gateway_client.GatewayServiceConfig(endpoint=gateway_endpoint, token_path=gateway_token_path)
     web = Path(web_dir) if web_dir else WEB_DIR
-    textures = Path(texture_dir) if texture_dir else _default_texture_dir()
     # Shared with the app.mount(...) below (question 139, M21.1): the "/" route is a
     # separate FileResponse and does not inherit StaticFiles behaviour, so index.html
     # is served through the same RevalidatingStaticFiles.file_response Starlette uses
@@ -882,8 +989,12 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
 
     @app.get("/api/health")
     async def health():
+        # `textures` used to be `textures.exists()`: true for an EMPTY directory, a false claim of
+        # health. It now says whether the directory holds anything servable (a regular file);
+        # `textureDir` and `earthTexture` say which file the Earth body needs and what is published.
         return {"ok": True, "clients": len(hub.clients), "scenarios": hub.names(),
-                "textures": textures.exists()}
+                "textures": _has_regular_file(textures), "textureDir": str(textures),
+                "earthTexture": hub.earth_texture_report(), "imagery": pyramid.health()}
 
     @app.get("/textures/{file}")
     async def texture(file: str):
@@ -1135,6 +1246,11 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
             hub.clients.discard(ws)
             log.info("browser disconnected (%d total)", len(hub.clients))
 
+    # Question 264: the pyramid, before the catch-all "/" mount below. StaticFiles refuses a path
+    # that resolves outside the directory (`..`, an encoded `..`, a symlink leading out), and
+    # check_dir=False lets a missing directory start (every request under it is then a plain 404).
+    app.mount(imagery_pyramid.URL_PREFIX.rstrip("/"),
+              OptionalDirStaticFiles(directory=str(imagery_path), check_dir=False), name="imagery")
     app.mount("/", web_static, name="static")
     return app
 
@@ -1476,6 +1592,15 @@ def _measurement_to_dict(m: core_pb2.Measurement) -> dict:
     }
 
 
+def _has_regular_file(directory: Path) -> bool:
+    """True when ``directory`` exists and holds at least one regular file (``/textures/<file>``
+    could serve something); False for a missing directory, a plain file, or an empty directory."""
+    try:
+        return any(entry.is_file() for entry in directory.iterdir())
+    except OSError:
+        return False
+
+
 def _clock_fields(msg: dict) -> dict:
     """Keep only the playback fields of a clock message (t, playing, speed, scenario)."""
     return {k: msg[k] for k in ("t", "playing", "speed", "scenario") if k in msg}
@@ -1498,8 +1623,10 @@ def serve(host: str = "0.0.0.0", port: int = DEFAULT_PORT, texture_dir: Optional
           tiles_token_path: Optional[os.PathLike] = None,
           gateway_endpoint: Optional[str] = None,
           gateway_token_path: Optional[os.PathLike] = None,
-          study_roots: Sequence[os.PathLike] = ()) -> None:
-    """Run the viewer server (blocking). ``study_roots`` (question 254 item 1) -- see
+          study_roots: Sequence[os.PathLike] = (),
+          imagery_dir: Optional[os.PathLike] = None) -> None:
+    """Run the viewer server (blocking). ``imagery_dir`` (question 264) -- see ``create_app``'s own
+    doc; passed straight through as the ``--imagery-dir`` CLI flag. ``study_roots`` (question 254 item 1) -- see
     ``create_app``'s own doc; passed straight through as the repeatable ``--study-root`` CLI
     flag, never read from the process environment. ``profile`` -- see ``create_app``'s docstring
     (M19.5, question 132). ``command_endpoint``/``command_admin_endpoint``/
@@ -1522,9 +1649,10 @@ def serve(host: str = "0.0.0.0", port: int = DEFAULT_PORT, texture_dir: Optional
                       command_admin_endpoint=command_admin_endpoint, command_entities=command_entities,
                       profiles_dir=profiles_dir, tiles_endpoint=tiles_endpoint,
                       tiles_token_path=tiles_token_path, gateway_endpoint=gateway_endpoint,
-                      gateway_token_path=gateway_token_path, study_roots=study_roots)
-    log.info("altavista viewer at http://%s:%d/  (textures: %s, profile: %s, command_endpoint: %s, tiles_endpoint: %s, gateway_endpoint: %s, study_roots: %s)",
-             host, port, _default_texture_dir(), profile, command_endpoint or "<not configured>", tiles_endpoint or "<not configured>",
+                      gateway_token_path=gateway_token_path, study_roots=study_roots,
+                      imagery_dir=imagery_dir)
+    log.info("altavista viewer at http://%s:%d/  (textures: %s, profile: %s, imagery: %s, command_endpoint: %s, tiles_endpoint: %s, gateway_endpoint: %s, study_roots: %s)",
+             host, port, texture_dir or _default_texture_dir(), profile, app.state.imagery_pyramid.summary(), command_endpoint or "<not configured>", tiles_endpoint or "<not configured>",
              gateway_endpoint or "<not configured>",
              ", ".join(str(r) for r in app.state.study_roots) or "<none: sweep samples cannot be opened>")
     uvicorn.run(app, host=host, port=port, log_level=log_level)

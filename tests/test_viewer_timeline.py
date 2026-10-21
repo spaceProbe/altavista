@@ -88,6 +88,7 @@ from altavista import cdm as cdm_adapter
 from altavista.pb import core_pb2, trajectory_pb2
 from altavista.pb.altavista.v1 import run_pb2
 from altavista.server import create_app
+from fixture_profiles import FIXTURE_PROFILES_DIR  # noqa: E402 -- test-only profile dir (question 264)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TIMELINE_CHECK = REPO_ROOT / "web" / "js" / "timeline_check.mjs"
@@ -283,7 +284,7 @@ def published_scenario(fixture_events: list[trajectory_pb2.Event]) -> dict:
     rp.trajectories["demo_flt"].CopyFrom(traj)
 
     with tempfile.TemporaryDirectory() as d:
-        app = create_app(texture_dir=Path(d), web_dir=Path(d))
+        app = create_app(texture_dir=Path(d), web_dir=Path(d), profiles_dir=FIXTURE_PROFILES_DIR)
         client = TestClient(app)
         resp = client.post("/api/cdm/run", content=rp.SerializeToString(),
                            headers={"content-type": "application/x-protobuf"})

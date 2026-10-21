@@ -20,6 +20,7 @@ from altavista import cdm
 from altavista.model import Event, Frame, ScenarioData, Trajectory
 from altavista.pb import trajectory_pb2
 from altavista.server import create_app
+from fixture_profiles import FIXTURE_PROFILES_DIR  # noqa: E402 -- test-only profile dir (question 264)
 
 # --------------------------------------------------------------------------- helpers
 def _traj(name="Sat", color="#fff"):
@@ -955,7 +956,7 @@ def test_an_invalid_model_is_refused_in_both_directions_the_same_way(bad):
 # --------------------------------------------------------------------------- endpoint
 @pytest.fixture()
 def client(tmp_path):
-    app = create_app(texture_dir=tmp_path, web_dir=tmp_path)
+    app = create_app(texture_dir=tmp_path, web_dir=tmp_path, profiles_dir=FIXTURE_PROFILES_DIR)
     return TestClient(app)
 
 

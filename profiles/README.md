@@ -64,9 +64,15 @@ planes:
 - **`imagery`** (M19.5, question 132) is the globe's tile source: an XYZ/WMTS URL
   template (`{z}`/`{x}`/`{y}` placeholders, substituted verbatim -- `web/js/globe.js`'s
   `urlForTile`), an attribution string the viewer actually displays (`web/js/app.js`'s
-  globe panel), and the source's own declared max zoom level. Every profile defaults to
-  the same offline fixture (`web/fixtures/gen_globe_tiles.py`) -- question 132 left
-  which public/restricted basemaps to ship per profile as a later user decision. Not a
+  globe panel), and the source's own declared max zoom level. Every shipped profile points
+  at the NASA Blue Marble pyramid the server mounts at `/imagery/bluemarble/`
+  (`./imagery/bluemarble/{z}/{x}/{y}.jpg`, `max_level: 5`, attribution "Blue Marble: Next
+  Generation (July 2004), NASA Earth Observatory"; question 264 answered the half of question
+  132 that left the shipped basemap open). The pyramid is built once by
+  `scripts/imagery/build_blue_marble_tiles.py` and checked by the server at start-up; for a
+  template that points there the scenario's `imagery` also carries `installed` (and, when
+  false, a `notice`). The flat-colour fixture (`web/fixtures/gen_globe_tiles.py`) is test
+  imagery only, carried by `tests/fixtures/profiles/`. Not a
   plane and not a `dynamics_backend`-style component list: a profile *selects* the
   imagery source (question 11's rule), it does not change how the globe behaves once it
   has one -- LOD thresholds, tile budget and resident-cache size stay hardcoded in

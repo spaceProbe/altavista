@@ -32,6 +32,7 @@ import shutil
 import socket
 import subprocess
 import sys
+from fixture_profiles import FIXTURE_PROFILE_ARGS  # noqa: E402 -- test-only profile dir (question 264)
 import tempfile
 import time
 import urllib.request
@@ -102,7 +103,7 @@ def _start_altavista_server(extra_args: Sequence[str] = ()) -> _LiveServer:
     """
     port = _free_port()
     proc = subprocess.Popen(
-        [sys.executable, "-m", "altavista", "serve", "--host", "127.0.0.1", "--port", str(port), *extra_args],
+        [sys.executable, "-m", "altavista", "serve", *FIXTURE_PROFILE_ARGS, "--host", "127.0.0.1", "--port", str(port), *extra_args],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(REPO_ROOT),
     )
     server = _LiveServer(port, proc)

@@ -49,8 +49,14 @@ export function registerDefaultLayoutForImagery(imagery, treeFactory) {
   registry.set(imagerySignature(imagery), treeFactory);
 }
 
-// The one entry that exists today: every shipped profile's offline-fixture imagery
-// (web/fixtures/gen_globe_tiles.py) resolves to the base sidebar+viewport split.
+// Every shipped profile's imagery (the Blue Marble pyramid at /imagery/bluemarble/, question
+// 264) and the offline test fixture's (web/fixtures/gen_globe_tiles.py, what the tests'
+// profiles carry) resolve to the base sidebar+viewport split. (An unregistered signature falls
+// back to the same split, so this table records what is known; it does not gate anything.)
+registerDefaultLayoutForImagery(
+  { urlTemplate: './imagery/bluemarble/{z}/{x}/{y}.jpg', maxLevel: 5 },
+  buildBaseSidebarViewportLayout,
+);
 registerDefaultLayoutForImagery(
   { urlTemplate: './fixtures/tiles/{z}/{x}/{y}.png', maxLevel: 2 },
   buildBaseSidebarViewportLayout,

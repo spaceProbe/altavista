@@ -1,0 +1,16 @@
+# TEST-ONLY profile (question 264): carries today's flat-colour fixture imagery
+# (web/fixtures/gen_globe_tiles.py -> web/fixtures/tiles/, served from web/) so the test suite never
+# depends on the Blue Marble pyramid, which is a large fetched-once artefact that is not in the
+# repository and may or may not be installed on the host running the tests. The shipped
+# profiles/feasibility.yaml point at /imagery/bluemarble/ instead. This directory is not packaged: it is
+# under tests/, outside the wheel's altavista/ package and its web/ + profiles/ copies.
+#
+# It declares only what altavista.profile.load_imagery_config reads (the id and the imagery
+# section); tests/test_profiles.py pins the url_template against web/js/globe.js's own
+# DEFAULT_IMAGERY_URL so the fixture default and the viewer's cannot drift apart.
+id: feasibility
+name: feasibility profile (test fixture imagery)
+imagery:
+  url_template: './fixtures/tiles/{z}/{x}/{y}.png'
+  attribution: 'Offline fixture tiles (web/fixtures/gen_globe_tiles.py) -- test imagery only, not a basemap'
+  max_level: 2

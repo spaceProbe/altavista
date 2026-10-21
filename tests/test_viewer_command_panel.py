@@ -67,6 +67,7 @@ from altavista.pb import authority_pb2, authority_pb2_grpc
 from altavista.test_env import drain_after_terminate
 from altavista.pb.altavista.v1 import command_pb2
 from altavista.server import Hub, create_app
+from fixture_profiles import FIXTURE_PROFILES_DIR  # noqa: E402 -- test-only profile dir (question 264)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 COMMAND_PANEL_CHECK = REPO_ROOT / "web" / "js" / "command_panel_check.mjs"
@@ -256,7 +257,7 @@ def client(command_service, tmp_path) -> TestClient:
     stamping end to end and because this is the one profile the command console panel's
     default layout actually applies to (question 201(d))."""
     app = create_app(
-        texture_dir=tmp_path, web_dir=tmp_path, profile="execution",
+        texture_dir=tmp_path, web_dir=tmp_path, profile="execution", profiles_dir=FIXTURE_PROFILES_DIR,
         command_endpoint=command_service.grpc_endpoint, command_admin_endpoint=command_service.admin_endpoint,
         command_entities=[CONSOLE_ENTITY, EMPTY_ENTITY],
     )
@@ -291,7 +292,7 @@ def test_design_profile_gets_its_own_real_profile_id(tmp_path):
     """The default profile ("design") is not "execution" -- a real, different profile id
     is stamped just the same, proving this is a genuine per-profile signal and not a
     hardcoded "execution" string somewhere."""
-    app = create_app(texture_dir=tmp_path, web_dir=tmp_path)  # profile defaults to "design"
+    app = create_app(texture_dir=tmp_path, web_dir=tmp_path, profiles_dir=FIXTURE_PROFILES_DIR)  # profile defaults to "design"
     client = TestClient(app)
     client.post("/api/scenario", json={"name": "cmd-panel-design-scenario", "spacecraft": []})
     sc = client.get("/api/scenario/cmd-panel-design-scenario").json()
@@ -310,7 +311,7 @@ def command_panel_check_input_path(tmp_path_factory, command_service, issuer):
     (mirrors tests/test_viewer_feasibility_panel.py's own `panels_check_input_path`)."""
     with tempfile.TemporaryDirectory() as d:
         app = create_app(
-            texture_dir=Path(d), web_dir=Path(d), profile="execution",
+            texture_dir=Path(d), web_dir=Path(d), profile="execution", profiles_dir=FIXTURE_PROFILES_DIR,
             command_endpoint=command_service.grpc_endpoint, command_admin_endpoint=command_service.admin_endpoint,
             command_entities=[CONSOLE_ENTITY, EMPTY_ENTITY],
         )
@@ -401,7 +402,7 @@ def command_panel_check_input_path(tmp_path_factory, command_service, issuer):
         # Degraded case: no command service configured at all -- a SEPARATE app, no
         # av-command subprocess involved.
         with tempfile.TemporaryDirectory() as d2:
-            unconfigured_app = create_app(texture_dir=Path(d2), web_dir=Path(d2))
+            unconfigured_app = create_app(texture_dir=Path(d2), web_dir=Path(d2), profiles_dir=FIXTURE_PROFILES_DIR)
             unconfigured_client = TestClient(unconfigured_app)
             not_configured_resp = unconfigured_client.get("/api/command/proposals?entity_id=sat-1")
             assert not_configured_resp.status_code == 503, not_configured_resp.text

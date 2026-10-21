@@ -35,6 +35,7 @@ from google.protobuf import json_format
 
 from altavista.pb.altavista.v1 import run_pb2
 from altavista.server import create_app
+from fixture_profiles import FIXTURE_PROFILES_DIR  # noqa: E402 -- test-only profile dir (question 264)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PANELS_CHECK = REPO_ROOT / "web" / "js" / "panels_check.mjs"
@@ -86,7 +87,7 @@ def published_frozen_demo_scenario(frozen_demo_bundle_bytes: bytes) -> dict:
     not imported, matching this repo's existing test_viewer_*.py convention of not
     cross-importing between viewer test files)."""
     with tempfile.TemporaryDirectory() as d:
-        app = create_app(texture_dir=Path(d), web_dir=Path(d))
+        app = create_app(texture_dir=Path(d), web_dir=Path(d), profiles_dir=FIXTURE_PROFILES_DIR)
         client = TestClient(app)
         resp = client.post("/api/cdm/run", content=frozen_demo_bundle_bytes,
                             headers={"content-type": "application/x-protobuf"})
@@ -105,7 +106,7 @@ def published_attitude_control_scenario() -> dict:
     ``scores`` here is whatever the live server actually threads through, unpatched.
     """
     with tempfile.TemporaryDirectory() as d:
-        app = create_app(texture_dir=Path(d), web_dir=Path(d))
+        app = create_app(texture_dir=Path(d), web_dir=Path(d), profiles_dir=FIXTURE_PROFILES_DIR)
         client = TestClient(app)
         resp = client.post("/api/cdm/run", content=FROZEN_ATTITUDE_CONTROL_BUNDLE_PATH.read_bytes(),
                             headers={"content-type": "application/x-protobuf"})

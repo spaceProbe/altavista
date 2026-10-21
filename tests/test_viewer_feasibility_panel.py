@@ -30,6 +30,7 @@ from fastapi.testclient import TestClient
 
 from altavista.pb.altavista.v1 import run_pb2
 from altavista.server import create_app
+from fixture_profiles import FIXTURE_PROFILES_DIR  # noqa: E402 -- test-only profile dir (question 264)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PANELS_CHECK = REPO_ROOT / "web" / "js" / "panels_check.mjs"
@@ -69,7 +70,7 @@ def run_products(frozen_demo_bundle_bytes: bytes) -> run_pb2.RunProducts:
 @pytest.fixture(scope="module")
 def published_frozen_demo_scenario(frozen_demo_bundle_bytes: bytes) -> dict:
     with tempfile.TemporaryDirectory() as d:
-        app = create_app(texture_dir=Path(d), web_dir=Path(d))
+        app = create_app(texture_dir=Path(d), web_dir=Path(d), profiles_dir=FIXTURE_PROFILES_DIR)
         client = TestClient(app)
         resp = client.post("/api/cdm/run", content=frozen_demo_bundle_bytes,
                             headers={"content-type": "application/x-protobuf"})

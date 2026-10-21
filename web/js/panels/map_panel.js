@@ -17,6 +17,7 @@
 import { tileCountX, tileCountY, tileBoundsDeg } from '../globe_lod.js';
 import { urlForTile } from '../globe.js';
 import { groundTrack, currentGroundPosition } from '../ground_track.js';
+import { basemapNotice } from '../imagery_status.js';
 
 /**
  * Every tile at `level`, in mosaic row order: row 0 (rendered at the TOP of the map) is
@@ -85,25 +86,37 @@ export function render(container, { sc, level = 1, t } = {}) {
     return;
   }
   const earth = findBody(sc, 'Earth');
-  const rows = mosaicRows(sc.imagery.urlTemplate, Math.min(level, sc.imagery.maxLevel ?? level));
+  // Question 264: the server found no Blue Marble pyramid. Say so (the same notice the
+  // globe-info line shows) instead of a mosaic of broken images or of the test colours; the
+  // ground tracks still draw, over the bare frame.
+  const missing = basemapNotice(sc.imagery);
+  if (missing) {
+    const notice = document.createElement('p');
+    notice.className = 'av-panel-notice av-map-basemap-notice';
+    notice.textContent = missing;
+    container.appendChild(notice);
+  }
 
   const wrap = document.createElement('div');
   wrap.className = 'av-map-wrap';
-  const mosaic = document.createElement('div');
-  mosaic.className = 'av-map-mosaic';
-  mosaic.style.gridTemplateColumns = `repeat(${rows[0].length}, 1fr)`;
-  mosaic.style.gridTemplateRows = `repeat(${rows.length}, 1fr)`;
-  for (const row of rows) {
-    for (const tile of row) {
-      const img = document.createElement('img');
-      img.className = 'av-map-tile';
-      img.src = tile.url;
-      img.alt = `tile ${tile.level}/${tile.x}/${tile.y}`;
-      img.draggable = false;
-      mosaic.appendChild(img);
+  if (!missing) {
+    const rows = mosaicRows(sc.imagery.urlTemplate, Math.min(level, sc.imagery.maxLevel ?? level));
+    const mosaic = document.createElement('div');
+    mosaic.className = 'av-map-mosaic';
+    mosaic.style.gridTemplateColumns = `repeat(${rows[0].length}, 1fr)`;
+    mosaic.style.gridTemplateRows = `repeat(${rows.length}, 1fr)`;
+    for (const row of rows) {
+      for (const tile of row) {
+        const img = document.createElement('img');
+        img.className = 'av-map-tile';
+        img.src = tile.url;
+        img.alt = `tile ${tile.level}/${tile.x}/${tile.y}`;
+        img.draggable = false;
+        mosaic.appendChild(img);
+      }
     }
+    wrap.appendChild(mosaic);
   }
-  wrap.appendChild(mosaic);
 
   const overlay = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   overlay.setAttribute('class', 'av-map-overlay');

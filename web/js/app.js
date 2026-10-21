@@ -25,6 +25,7 @@ import { hasRicFrame, isExecutionProfile, ICRF_PANEL_ID, RIC_PANEL_ID, GLOBE_PAN
 // publishes (drms/M25_3E_REPORT.md).
 import { render as renderRunProducts, timelineMeasurementTicks } from './panels/run_products_panel.js';
 import { render as renderMap } from './panels/map_panel.js';
+import { basemapNotInstalled, globeOnInfo, globeNotInstalledInfo } from './imagery_status.js';
 import { render as renderConsole } from './panels/console_panel.js';
 // F3b (docs/feasibility-plan.md's F3 milestone): the feasibility-study panel. `sc.sweep`
 // is real, wire-published data only for a scenario worker A's `POST /api/cdm/sweep`
@@ -790,9 +791,16 @@ function setupRpoViewports(sc) {
   viewer.setViewportFrame('globe', sc.frame.name, null);
   if (viewer.bodies.has('Earth')) {
     const imagery = sc.imagery || {};
+    if (basemapNotInstalled(imagery)) {
+      // Question 264: no tiles that would all 404, no fallback colours -- the plain body stays
+      // and the globe-info line says why and how to build the basemap.
+      els.globe.checked = false;
+      els.globeInfo.textContent = globeNotInstalledInfo(imagery);
+      return;
+    }
     viewer.enableGlobe('Earth', { imageryUrl: imagery.urlTemplate, maxLevel: imagery.maxLevel });
     els.globe.checked = true;
-    els.globeInfo.textContent = 'globe: Earth (quadtree WGS84, LOD by camera distance)' + (imagery.attribution ? ` · imagery: ${imagery.attribution}` : '');
+    els.globeInfo.textContent = globeOnInfo(imagery);
   }
 }
 
@@ -851,10 +859,14 @@ els.origin.addEventListener('change', () => viewer.setFloatingOriginEnabled(els.
 els.globe.addEventListener('change', () => {
   if (els.globe.checked) {
     const imagery = (scenario && scenario.imagery) || {};
+    if (basemapNotInstalled(imagery)) {
+      // Question 264: see setupRpoViewports -- the plain body, and the reason, never a 404 storm.
+      els.globe.checked = false;
+      els.globeInfo.textContent = globeNotInstalledInfo(imagery);
+      return;
+    }
     const ok = viewer.enableGlobe('Earth', { imageryUrl: imagery.urlTemplate, maxLevel: imagery.maxLevel });
-    els.globeInfo.textContent = ok
-      ? 'globe: Earth (quadtree WGS84, LOD by camera distance)' + (imagery.attribution ? ` · imagery: ${imagery.attribution}` : '')
-      : "globe: no 'Earth' body in this scenario";
+    els.globeInfo.textContent = ok ? globeOnInfo(imagery) : "globe: no 'Earth' body in this scenario";
     if (!ok) els.globe.checked = false;
   } else {
     viewer.disableGlobe();

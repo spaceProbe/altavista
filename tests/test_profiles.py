@@ -206,16 +206,56 @@ def test_every_profile_declares_an_imagery_section(name):
     )
 
 
-@pytest.mark.parametrize("name", ["design.yaml", "feasibility.yaml", "analysis.yaml", "execution.yaml"])
-def test_every_profiles_default_imagery_matches_globe_js(name):
-    """M19.5's own required check: "a test that the default profile yields the offline
-    fixture source." Every profile's declared `url_template` must equal web/js/globe.js's
-    own `DEFAULT_IMAGERY_URL` constant -- fails if a profile's default is pointed
-    somewhere else (a real basemap URL, a typo'd fixture path, an empty string) while
-    globe.js's own fallback still expects the fixture, or vice versa.
-    """
-    doc = _load(name)
+_PROFILE_FILES = ["design.yaml", "feasibility.yaml", "analysis.yaml", "execution.yaml"]
+FIXTURE_PROFILES = REPO_ROOT / "tests" / "fixtures" / "profiles"
+
+
+@pytest.mark.parametrize("name", _PROFILE_FILES)
+def test_the_test_profile_carries_the_fixture_imagery_globe_js_defaults_to(name):
+    """M19.5's own required check ("the default yields the offline fixture source"), moved
+    off the shipped profiles by question 264 and onto the TEST profile
+    (tests/fixtures/profiles/, which carries today's flat-colour fixture so the suite never
+    depends on the Blue Marble pyramid): its `url_template` must equal web/js/globe.js's own
+    `DEFAULT_IMAGERY_URL` constant and its `max_level` the fixture pyramid's depth -- fails if
+    either drifts from the other, or from web/fixtures/tiles/."""
+    doc = yaml.safe_load((FIXTURE_PROFILES / name).read_text())
     assert doc["imagery"]["url_template"] == _default_imagery_url_from_globe_js()
+    assert doc["imagery"]["max_level"] == 2
+    assert doc["id"] == name[: -len(".yaml")], f"{name}: the test profile must keep the shipped profile's id"
+
+
+@pytest.mark.parametrize("name", _PROFILE_FILES)
+def test_every_shipped_profile_points_at_the_blue_marble_pyramid(name):
+    """Question 264: every shipped profile's imagery is the NASA Blue Marble pyramid the
+    server mounts at `/imagery/bluemarble/` -- relative to the page, `{z}/{x}/{y}.jpg`, five
+    levels deep, with NASA's credit as the displayed attribution -- and never the test
+    fixture (which would make a shipped viewer silently draw flat colours)."""
+    from altavista import imagery_pyramid
+
+    imagery = _load(name)["imagery"]
+    assert imagery["url_template"] == "./imagery/bluemarble/{z}/{x}/{y}.jpg"
+    assert imagery_pyramid.template_uses_pyramid(imagery["url_template"])
+    assert imagery["url_template"] != _default_imagery_url_from_globe_js()
+    assert imagery["max_level"] == 5
+    assert "NASA Earth Observatory" in imagery["attribution"]
+    assert "fixture" not in imagery["attribution"].lower()
+
+
+def test_the_test_profiles_are_not_shipped_in_the_wheel():
+    """`tests/fixtures/profiles/` is a tests-only place: setup.py's build_py copies only `web/`
+    and `profiles/` into the wheel, and the packaged `altavista` packages are `altavista*`, so a
+    directory under `tests/` never ships. Fails if the copy list ever grows to include it, or if
+    the test profiles move under a shipped directory."""
+    setup_py = (REPO_ROOT / "setup.py").read_text()
+    m = re.search(r"_EXTRA_PACKAGE_DIRS = \(([^)]*)\)", setup_py)
+    assert m, "setup.py no longer declares _EXTRA_PACKAGE_DIRS"
+    shipped = {part.strip().strip("\"'") for part in m.group(1).split(",") if part.strip()}
+    assert shipped == {"web", "profiles"}
+    resolved = FIXTURE_PROFILES.resolve()
+    for name in shipped:
+        assert not resolved.is_relative_to((REPO_ROOT / name).resolve())
+    assert not resolved.is_relative_to((REPO_ROOT / "altavista").resolve())
+    assert {p.name for p in FIXTURE_PROFILES.glob("*.yaml")} == set(_PROFILE_FILES)
 
 
 def test_imagery_section_is_never_swept_into_the_component_checker():

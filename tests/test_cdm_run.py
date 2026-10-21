@@ -80,6 +80,7 @@ from altavista.model import Frame
 from altavista.pb import core_pb2, trajectory_pb2
 from altavista.pb.altavista.v1 import run_pb2
 from altavista.server import create_app
+from fixture_profiles import FIXTURE_PROFILES_DIR  # noqa: E402 -- test-only profile dir (question 264)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DRM_PATH = REPO_ROOT / "drms" / "leo_1day_maneuver_vnb.drm.yaml"
@@ -185,7 +186,7 @@ def demo_run_bundle_bytes(av_run_bin, tmp_path_factory) -> bytes:
 
 @pytest.fixture()
 def client(tmp_path) -> TestClient:
-    app = create_app(texture_dir=tmp_path, web_dir=tmp_path)
+    app = create_app(texture_dir=tmp_path, web_dir=tmp_path, profiles_dir=FIXTURE_PROFILES_DIR)
     return TestClient(app)
 
 
@@ -824,7 +825,7 @@ def test_published_scenario_carries_the_active_profiles_imagery_config(published
     have no `imagery` key), or one that hardcodes a different attribution/template
     than what the profile file actually declares.
     """
-    expected = profile_loader.load_imagery_config(profile_loader.DEFAULT_PROFILE_ID)
+    expected = profile_loader.load_imagery_config(profile_loader.DEFAULT_PROFILE_ID, profiles_dir=FIXTURE_PROFILES_DIR)
     assert published_frozen_demo_scenario["imagery"] == expected
 
 
@@ -839,7 +840,7 @@ def test_attribution_string_reaches_the_headless_viewer_harness(published_frozen
     `attribution` (an imagery source with an attribution string nothing displays is not
     done, per this task's own brief).
     """
-    declared = profile_loader.load_imagery_config(profile_loader.DEFAULT_PROFILE_ID)
+    declared = profile_loader.load_imagery_config(profile_loader.DEFAULT_PROFILE_ID, profiles_dir=FIXTURE_PROFILES_DIR)
     assert published_frozen_demo_scenario["imagery"]["attribution"] == declared["attribution"]
     assert declared["attribution"].strip(), "the profile's own attribution string must not be blank"
 
@@ -1812,7 +1813,7 @@ def test_demo_measurements_real_bundle_publishes_36_measurements_with_right_ids_
             assert m.epoch_ns == expected_epoch_ns, f"k={k} id={m.measurement_id}"
             assert m.frame_id == "", f"k={k} id={m.measurement_id}"
 
-    app = create_app(texture_dir=tmp_path, web_dir=tmp_path)
+    app = create_app(texture_dir=tmp_path, web_dir=tmp_path, profiles_dir=FIXTURE_PROFILES_DIR)
     test_client = TestClient(app)
     resp = test_client.post("/api/cdm/run", content=rp.SerializeToString(), headers={"content-type": "application/x-protobuf"})
     assert resp.status_code == 200, resp.text

@@ -61,6 +61,7 @@ import re
 import shutil
 import subprocess
 import sys
+from fixture_profiles import FIXTURE_PROFILE_ARGS  # noqa: E402 -- test-only profile dir (question 264)
 import tempfile
 import threading
 import time
@@ -266,7 +267,7 @@ def live_server(tmp_path, fake_gateway, fake_tiles_gateway):
     env = dict(os.environ)
     proc = subprocess.Popen(
         [
-            sys.executable, "-m", "altavista", "serve", "--host", "127.0.0.1", "--port", str(port),
+            sys.executable, "-m", "altavista", "serve", *FIXTURE_PROFILE_ARGS, "--host", "127.0.0.1", "--port", str(port),
             "--gateway-endpoint", f"127.0.0.1:{gw_port}", "--gateway-token-path", str(gateway_token_path),
             "--tiles-endpoint", f"127.0.0.1:{tiles_server.server_address[1]}", "--tiles-token-path", str(tiles_token_path),
         ],

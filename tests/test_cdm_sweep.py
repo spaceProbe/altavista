@@ -23,6 +23,7 @@ from google.protobuf import json_format
 
 from altavista.pb.altavista.v1 import run_pb2
 from altavista.server import _sweep_results_to_dict, create_app
+from fixture_profiles import FIXTURE_PROFILES_DIR  # noqa: E402 -- test-only profile dir (question 264)
 
 from pathlib import Path
 
@@ -57,7 +58,7 @@ def fixture_results(fixture_bytes) -> run_pb2.SweepResults:
 
 @pytest.fixture()
 def client(tmp_path) -> TestClient:
-    app = create_app(texture_dir=tmp_path, web_dir=tmp_path)
+    app = create_app(texture_dir=tmp_path, web_dir=tmp_path, profiles_dir=FIXTURE_PROFILES_DIR)
     return TestClient(app)
 
 
@@ -145,7 +146,7 @@ def create_app_and_publish_binary(fixture_bytes: bytes) -> dict:
     binary publish without entangling the two TestClient fixtures' scenario stores."""
     import tempfile
     with tempfile.TemporaryDirectory() as td:
-        app = create_app(texture_dir=td, web_dir=td)
+        app = create_app(texture_dir=td, web_dir=td, profiles_dir=FIXTURE_PROFILES_DIR)
         c = TestClient(app)
         resp = c.post("/api/cdm/sweep", content=fixture_bytes, headers={"content-type": "application/x-protobuf"})
         assert resp.status_code == 200, resp.text

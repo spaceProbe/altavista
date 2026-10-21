@@ -70,6 +70,16 @@ def main(argv=None) -> int:
                          "only from a directory inside one of these (repeatable; default: none, "
                          "so samples cannot be opened)")
 
+    # Question 264: the Blue Marble tile pyramid (scripts/imagery/build_blue_marble_tiles.py --out DIR),
+    # served at /imagery/bluemarble/ and checked once at start-up. Ordinary CLI flag, never the
+    # process environment (question 199). Default None: the server uses
+    # ~/altavista-data/imagery/bluemarble.
+    s.add_argument("--imagery-dir", default=None, metavar="DIR",
+                    help="folder holding the Blue Marble tile pyramid, served at /imagery/bluemarble/ "
+                         "(default: ~/altavista-data/imagery/bluemarble; build it with "
+                         "scripts/imagery/build_blue_marble_tiles.py; the server says so at start-up "
+                         "and in the viewer when it is missing)")
+
     r = sub.add_parser("run", help="run a GMAT script and publish it to the viewer")
     r.add_argument("script")
     r.add_argument("--name", default=None)
@@ -87,7 +97,7 @@ def main(argv=None) -> int:
               profiles_dir=args.profiles_dir,
               tiles_endpoint=args.tiles_endpoint, tiles_token_path=args.tiles_token_path,
               gateway_endpoint=args.gateway_endpoint, gateway_token_path=args.gateway_token_path,
-              study_roots=args.study_roots or [])
+              study_roots=args.study_roots or [], imagery_dir=args.imagery_dir)
         return 0
     if args.cmd == "run":
         from .scenario import Scenario

@@ -43,6 +43,7 @@ import os
 import shutil
 import subprocess
 import sys
+from fixture_profiles import FIXTURE_PROFILE_ARGS, FIXTURE_PROFILES_DIR  # noqa: E402 -- test-only profile dir (question 264)
 import tempfile
 import time
 import urllib.parse
@@ -135,7 +136,7 @@ def test_an_invalid_visual_model_uri_is_refused(bad):
 
 
 def test_cdm_trajectory_route_passes_the_model_through_and_refuses_an_invalid_one(tmp_path):
-    client = TestClient(create_app(texture_dir=tmp_path, web_dir=tmp_path))
+    client = TestClient(create_app(texture_dir=tmp_path, web_dir=tmp_path, profiles_dir=FIXTURE_PROFILES_DIR))
     cdm = _fixed_cdm_trajectory()
     cdm.visual_model_uri = MODEL_FIXTURE_URL
     resp = client.post("/api/cdm/trajectory", content=cdm.SerializeToString(),
@@ -192,7 +193,7 @@ def _scenario_run_bytes(data: ScenarioData, run_id: str) -> bytes:
 
 
 def test_a_python_built_scenarios_model_reaches_the_published_scenario(tmp_path):
-    client = TestClient(create_app(texture_dir=tmp_path, web_dir=tmp_path))
+    client = TestClient(create_app(texture_dir=tmp_path, web_dir=tmp_path, profiles_dir=FIXTURE_PROFILES_DIR))
     published = {}
     for with_model in (True, False):
         data = _python_scenario(with_model=with_model)
@@ -264,7 +265,7 @@ def test_av_run_puts_the_declared_model_on_the_wire_trajectory(model_run_bytes, 
 
 
 def test_cdm_run_route_publishes_the_model_on_the_spacecraft(model_run_bytes, plain_run_bytes, tmp_path):
-    client = TestClient(create_app(texture_dir=tmp_path, web_dir=tmp_path))
+    client = TestClient(create_app(texture_dir=tmp_path, web_dir=tmp_path, profiles_dir=FIXTURE_PROFILES_DIR))
     for data, expected in ((model_run_bytes, MODEL_FIXTURE_URL), (plain_run_bytes, None)):
         resp = client.post("/api/cdm/run", content=data, headers={"content-type": "application/x-protobuf"})
         assert resp.status_code == 200, resp.text
@@ -327,7 +328,7 @@ def _start_server() -> _LiveServer:
     """A live ``python -m altavista serve`` on a free loopback port, ready (``/api/health``)."""
     port = _free_port()
     proc = subprocess.Popen(
-        [sys.executable, "-m", "altavista", "serve", "--host", "127.0.0.1", "--port", str(port)],
+        [sys.executable, "-m", "altavista", "serve", *FIXTURE_PROFILE_ARGS, "--host", "127.0.0.1", "--port", str(port)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(REPO_ROOT), env=dict(os.environ))
     server = _LiveServer(port, proc)
     deadline = time.monotonic() + 30

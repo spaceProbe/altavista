@@ -175,6 +175,7 @@ import re
 import shutil
 import subprocess
 import sys
+from fixture_profiles import FIXTURE_PROFILE_ARGS  # noqa: E402 -- test-only profile dir (question 264)
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -425,7 +426,7 @@ def viewer_server(av_tiles_service, tiles_token_path):
     port = _free_port()
     proc = subprocess.Popen(
         [
-            sys.executable, "-m", "altavista", "serve",
+            sys.executable, "-m", "altavista", "serve", *FIXTURE_PROFILE_ARGS,
             "--host", "127.0.0.1", "--port", str(port),
             "--tiles-endpoint", av_tiles_service.endpoint,
             "--tiles-token-path", str(tiles_token_path),

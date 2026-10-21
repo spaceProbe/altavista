@@ -34,6 +34,7 @@ from fastapi.testclient import TestClient
 
 from altavista.pb.altavista.v1 import run_pb2
 from altavista.server import create_app
+from fixture_profiles import FIXTURE_PROFILES_DIR  # noqa: E402 -- test-only profile dir (question 264)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUSTUP_PATH_PREFIX = "/opt/homebrew/opt/rustup/bin"
@@ -77,7 +78,7 @@ def track_run_bundle_bytes(av_track_demo_bin, tmp_path_factory) -> bytes:
 
 @pytest.fixture()
 def client(tmp_path) -> TestClient:
-    app = create_app(texture_dir=tmp_path, web_dir=tmp_path)
+    app = create_app(texture_dir=tmp_path, web_dir=tmp_path, profiles_dir=FIXTURE_PROFILES_DIR)
     return TestClient(app)
 
 
