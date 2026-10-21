@@ -36,8 +36,10 @@ GET  /imagery/bluemarble/*  the Blue Marble tile pyramid ({z}/{x}/{y}.jpg, body/
                             here. Checked once at start-up (altavista.imagery_pyramid): when it is not
                             installed the server logs one WARNING, ``scenario.imagery`` carries
                             ``installed: false`` and a ``notice``, and the viewer keeps the plain body
-                            (question 264). If GMAT's Earth texture is absent too, Earth is published
-                            with the pyramid's own body/earth-2048x1024.jpg instead
+                            (question 264). Without GMAT's textures no body is published with a
+                            /textures/ URL that would 404: Earth gets the pyramid's own
+                            body/earth-2048x1024.jpg when it is installed, every other body (and
+                            Earth when it is not) no texture, i.e. its flat colour
 GET  /api/health            liveness and scenarios; ``textures`` is true only if the texture directory
                             holds a file, ``earthTexture`` says whether GMAT's Earth image is there
                             and which one is published (gmat, pyramid or none); ``imagery`` is the
@@ -225,56 +227,73 @@ class Hub:
         # behaviour rather than guessing (this task's own explicit rule).
         self.profile_id = profile_id
         # Question 264, the plain body: `texture_dir` is where `/textures/<file>` is served from and
-        # `pyramid` the start-up verdict on the Blue Marble directory. put() uses the two to publish
-        # Earth with the pyramid's own whole-Earth image when GMAT's texture is not there. Both
+        # `pyramid` the start-up verdict on the Blue Marble directory. put() uses the two so that no
+        # body is published with a `/textures/` URL that would 404: Earth gets the pyramid's own
+        # whole-Earth image when GMAT's texture is not there, every other body none. `texture_dir`
         # None (every Hub built directly by a test) leaves bodies exactly as published.
         self.texture_dir = Path(texture_dir) if texture_dir is not None else None
         self.pyramid = pyramid
-        self._plain_body_logged = False
+        self._textures_logged: Set[str] = set()
 
     def earth_texture_report(self) -> dict:
         """What the server can actually serve for Earth's body, for ``GET /api/health``: the GMAT
         texture file ``altavista.bodies`` names (``TEXTURES["Earth"]``) and whether it is in the
         texture directory, and which texture ``put()`` will therefore publish -- ``"gmat"`` (that
-        file, kept), ``"pyramid"`` (the pyramid's whole-Earth image, see ``_plain_earth_texture``) or
-        ``"none"`` (the body stays a flat colour)."""
+        file, kept), ``"pyramid"`` (the pyramid's whole-Earth image, see ``_publishable_texture``) or
+        ``"none"`` (no texture is published, ``url`` is null and the body is its flat colour). It is
+        computed by the same rule ``put()`` applies, so the two cannot disagree."""
         from .bodies import TEXTURES  # no GMAT needed to import it
 
         name = TEXTURES["Earth"]
         present = self.texture_dir is not None and (self.texture_dir / name).is_file()
-        pyramid = self.pyramid is not None and self.pyramid.installed and self.pyramid.has_body_texture
-        publishes = "gmat" if present else "pyramid" if pyramid else "none"
-        url = {"gmat": f"/textures/{name}", "pyramid": imagery_pyramid.BODY_URL, "none": None}[publishes]
+        url = self._publishable_texture("Earth", f"/textures/{name}") if self.texture_dir is not None else None
+        publishes = "none" if url is None else "pyramid" if url == imagery_pyramid.BODY_URL else "gmat"
         return {"file": name, "present": present, "publishes": publishes, "url": url}
 
-    def _plain_earth_texture(self, body: dict) -> None:
-        """Question 264 (task 4): swap Earth's texture for the pyramid's `body/earth-2048x1024.jpg`
-        when it names a `/textures/<file>` that the texture directory does not have (GMAT absent, or
-        `--textures` pointing elsewhere) and the pyramid is installed, so Earth shows without GMAT
-        and without a 404. A texture that IS present (GMAT's `ModifiedBlueMarble.jpg`, the picture
-        this viewer mirrors) is left alone, and with neither present the body is left as published:
-        the browser's own texture-load failure keeps its flat colour, and the scenario's `imagery`
-        notice already says why the basemap is missing."""
-        if self.texture_dir is None or self.pyramid is None or not self.pyramid.installed:
-            return
-        if not self.pyramid.has_body_texture or body.get("name") != "Earth":
-            return
-        texture = body.get("texture")
-        prefix = "/textures/"
-        if not isinstance(texture, str) or not texture.startswith(prefix):
-            return
-        name = texture[len(prefix):]
+    def _publishable_texture(self, body_name: str, texture: str) -> Optional[str]:
+        """The texture URL to publish for a body whose texture is the ``/textures/<file>`` URL
+        ``texture`` (question 264): that URL when the file is in the texture directory (GMAT's own
+        pictures, which this viewer mirrors, are always kept); for Earth, when it is not, the
+        pyramid's ``body/earth-2048x1024.jpg`` if the pyramid is installed and lists it, so Earth shows
+        without GMAT; otherwise ``None``. Never a ``/textures/`` URL that would 404: without GMAT, Sun,
+        Luna and the planets publish no texture and the browser draws their flat colour
+        (``web/js/scene.js`` ``makeBodyMesh`` uses ``b.color`` when ``b.texture`` is falsy). A name that
+        is not a path component cannot be served at all (``/textures/{file}`` answers 400), so it counts
+        as absent."""
+        name = texture[len("/textures/"):]
         try:
             validate_path_component_id(name)
+            present = (self.texture_dir / name).is_file()
         except PathIdError:
+            present = False
+        if present:
+            return texture
+        if body_name == "Earth" and self.pyramid is not None and self.pyramid.installed \
+                and self.pyramid.has_body_texture:
+            return imagery_pyramid.BODY_URL
+        return None
+
+    def _resolve_body_texture(self, body: dict) -> None:
+        """Apply ``_publishable_texture`` to one published body, logging each body name's change once.
+        Only a ``/textures/<file>`` texture is touched (another URL, or no texture, is left alone), and
+        only when the texture directory is known (a ``Hub`` built directly leaves bodies as published).
+        The scenario's ``imagery`` notice stays the visible signal that the basemap is not installed."""
+        texture = body.get("texture")
+        if self.texture_dir is None or not isinstance(texture, str) or not texture.startswith("/textures/"):
             return
-        if (self.texture_dir / name).is_file():
+        name = str(body.get("name"))
+        publish = self._publishable_texture(name, texture)
+        if publish == texture:
             return
-        body["texture"] = imagery_pyramid.BODY_URL
-        if not self._plain_body_logged:
-            self._plain_body_logged = True
-            log.info("Earth texture %s is not in %s; publishing Earth with %s from the Blue Marble pyramid instead",
-                     texture, self.texture_dir, imagery_pyramid.BODY_URL)
+        body["texture"] = publish
+        if name not in self._textures_logged:
+            self._textures_logged.add(name)
+            if publish is None:
+                log.info("%s texture %s is not in %s; publishing %s with no texture (its flat colour)",
+                         name, texture, self.texture_dir, name)
+            else:
+                log.info("%s texture %s is not in %s; publishing %s with %s from the Blue Marble pyramid instead",
+                         name, texture, self.texture_dir, name, publish)
 
     # -- scenario store -------------------------------------------------
     def put(self, scenario: dict) -> str:
@@ -283,7 +302,7 @@ class Hub:
             scenario["imagery"] = self.imagery
         for body in scenario.get("bodies") or []:
             if isinstance(body, dict):
-                self._plain_earth_texture(body)
+                self._resolve_body_texture(body)
         if self.profile_id is not None and "profileId" not in scenario:
             scenario["profileId"] = self.profile_id
         if name not in self.scenarios:

@@ -334,62 +334,115 @@ EARTH_GMAT = {"name": "Earth", "texture": "/textures/ModifiedBlueMarble.jpg", "r
 LUNA_GMAT = {"name": "Luna", "texture": "/textures/Moon_HermesCelestiaMotherlode.jpg", "radius": 1737.4}
 
 
-def test_earth_without_gmat_texture_gets_the_pyramids_body_image(tmp_path, pyramid, caplog):
+def every_gmat_body() -> list:
+    """One body per name altavista/bodies.py's TEXTURES knows, each naming its GMAT texture file."""
+    from altavista.bodies import TEXTURES
+
+    return [{"name": n, "texture": f"/textures/{f}", "radius": 1.0} for n, f in TEXTURES.items()]
+
+
+def textures_published(got: dict) -> dict:
+    return {b["name"]: b.get("texture") for b in got["bodies"]}
+
+
+def test_earth_without_gmat_texture_gets_the_pyramids_body_image_and_the_others_none(tmp_path, pyramid, caplog):
     textures = tmp_path / "textures"
-    textures.mkdir()  # GMAT's texture folder exists but has no Earth image
+    textures.mkdir()  # GMAT's texture folder exists but is empty
     with caplog.at_level(logging.INFO, logger="altavista.server"):
         client = make_client(tmp_path, pyramid, texture_dir=textures)
-        got = publish(client, bodies=[dict(EARTH_GMAT), dict(LUNA_GMAT)])
-        publish(client, "second", bodies=[dict(EARTH_GMAT)])
-    earth = next(b for b in got["bodies"] if b["name"] == "Earth")
-    assert earth["texture"] == "/imagery/bluemarble/body/earth-2048x1024.jpg"
+        got = publish(client, bodies=every_gmat_body())
+        publish(client, "second", bodies=every_gmat_body())
+    published = textures_published(got)
+    assert published.pop("Earth") == "/imagery/bluemarble/body/earth-2048x1024.jpg"
     # the substituted URL is really served
-    assert client.get(earth["texture"]).content == TILE_BYTES[imagery_pyramid.BODY_FILE]
-    # only Earth: Luna still names its (absent) GMAT texture, honestly
-    assert next(b for b in got["bodies"] if b["name"] == "Luna")["texture"] == LUNA_GMAT["texture"]
-    # logged once, however many scenarios
-    swaps = [r for r in records(caplog, logging.INFO) if "Earth texture" in r.getMessage()]
-    assert len(swaps) == 1 and str(textures) in swaps[0].getMessage()
+    assert client.get("/imagery/bluemarble/body/earth-2048x1024.jpg").content == TILE_BYTES[imagery_pyramid.BODY_FILE]
+    # every other body: no texture at all (its flat colour), never a /textures/ URL that would 404
+    assert published and all(t is None for t in published.values()), published
     assert got["imagery"]["installed"] is True
+    # each body's change is logged once, however many scenarios
+    earth = [r for r in records(caplog, logging.INFO) if r.getMessage().startswith("Earth texture")]
+    luna = [r for r in records(caplog, logging.INFO) if r.getMessage().startswith("Luna texture")]
+    assert len(earth) == 1 and str(textures) in earth[0].getMessage() and "pyramid" in earth[0].getMessage()
+    assert len(luna) == 1 and "no texture" in luna[0].getMessage()
 
 
-def test_gmats_own_earth_texture_is_kept_when_it_is_there(tmp_path, pyramid, caplog):
+def test_an_empty_texture_dir_publishes_no_textures_url_that_would_404(tmp_path):
+    """No GMAT and no pyramid: nothing under /textures/ is published for any body, so the browser
+    makes no request that 404s; the scenario's imagery notice is the visible signal."""
     textures = tmp_path / "textures"
     textures.mkdir()
-    (textures / "ModifiedBlueMarble.jpg").write_bytes(b"gmat earth")
+    client = make_client(tmp_path, tmp_path / "never-built", texture_dir=textures)
+    got = publish(client, bodies=every_gmat_body())
+    published = textures_published(got)
+    assert all(t is None for t in published.values()), published
+    for body in got["bodies"]:
+        assert body["radius"] == 1.0 and body["name"]  # only the texture is dropped
+    assert got["imagery"]["installed"] is False and got["imagery"]["notice"]
+    # and the health report says the same thing the publish did
+    assert client.get("/api/health").json()["earthTexture"]["url"] is None
+
+
+def test_a_missing_texture_dir_publishes_no_textures_url_either(tmp_path):
+    client = make_client(tmp_path, tmp_path / "never-built", texture_dir=tmp_path / "absent")
+    assert all(t is None for t in textures_published(publish(client, bodies=every_gmat_body())).values())
+
+
+def test_gmats_own_textures_are_kept_when_they_are_there(tmp_path, pyramid, caplog):
+    from altavista.bodies import TEXTURES
+
+    textures = tmp_path / "textures"
+    textures.mkdir()
+    for f in TEXTURES.values():
+        (textures / f).write_bytes(b"gmat " + f.encode())
     with caplog.at_level(logging.INFO, logger="altavista.server"):
         client = make_client(tmp_path, pyramid, texture_dir=textures)
-        got = publish(client, bodies=[dict(EARTH_GMAT)])
-    assert got["bodies"][0]["texture"] == "/textures/ModifiedBlueMarble.jpg"
-    assert client.get("/textures/ModifiedBlueMarble.jpg").content == b"gmat earth"
-    assert not [r for r in records(caplog, logging.INFO) if "Earth texture" in r.getMessage()]
+        got = publish(client, bodies=every_gmat_body())
+    assert textures_published(got) == {n: f"/textures/{f}" for n, f in TEXTURES.items()}
+    assert client.get("/textures/ModifiedBlueMarble.jpg").content == b"gmat ModifiedBlueMarble.jpg"
+    assert not [r for r in records(caplog, logging.INFO) if "texture" in r.getMessage() and "is not in" in r.getMessage()]
 
 
-def test_with_neither_texture_nor_pyramid_the_body_is_left_alone_and_the_notice_is_there(tmp_path, caplog):
+def test_a_body_whose_texture_file_is_present_is_kept_while_an_absent_one_is_dropped(tmp_path, pyramid):
+    textures = tmp_path / "textures"
+    textures.mkdir()
+    (textures / "Moon_HermesCelestiaMotherlode.jpg").write_bytes(b"moon")  # Luna's only
+    client = make_client(tmp_path, pyramid, texture_dir=textures)
+    got = textures_published(publish(client, bodies=[dict(EARTH_GMAT), dict(LUNA_GMAT), {"name": "Mars", "texture": "/textures/Mars_JPLCaltechUSGS.jpg"}]))
+    assert got == {"Earth": "/imagery/bluemarble/body/earth-2048x1024.jpg",
+                   "Luna": "/textures/Moon_HermesCelestiaMotherlode.jpg", "Mars": None}
+
+
+def test_with_neither_texture_nor_pyramid_earth_drops_its_texture_and_the_notice_is_there(tmp_path, caplog):
     with caplog.at_level(logging.INFO, logger="altavista.server"):
         client = make_client(tmp_path, tmp_path / "never-built", texture_dir=tmp_path / "textures")
         got = publish(client, bodies=[dict(EARTH_GMAT)])
-    assert got["bodies"][0]["texture"] == "/textures/ModifiedBlueMarble.jpg"  # not pointed at a pyramid that is not there
-    assert client.get("/textures/ModifiedBlueMarble.jpg").status_code == 404  # the browser keeps the flat colour
+    assert got["bodies"][0]["texture"] is None  # was left as a 404 URL before this fix
     assert got["imagery"]["installed"] is False and got["imagery"]["notice"]
-    assert not [r for r in records(caplog, logging.INFO) if "Earth texture" in r.getMessage()]
+    assert len([r for r in records(caplog, logging.INFO) if r.getMessage().startswith("Earth texture")]) == 1
 
 
-def test_a_pyramid_without_the_body_image_does_not_substitute(tmp_path, pyramid):
+def test_a_pyramid_without_the_body_image_does_not_substitute_so_earth_drops_its_texture(tmp_path, pyramid):
     manifest = json.loads((pyramid / "manifest.json").read_text())
     del manifest["files"][imagery_pyramid.BODY_FILE]
     (pyramid / "manifest.json").write_text(json.dumps(manifest))
     client = make_client(tmp_path, pyramid, texture_dir=tmp_path / "textures")
     got = publish(client, bodies=[dict(EARTH_GMAT)])
     assert got["imagery"]["installed"] is True
-    assert got["bodies"][0]["texture"] == "/textures/ModifiedBlueMarble.jpg"
+    assert got["bodies"][0]["texture"] is None
 
 
-@pytest.mark.parametrize("texture", [None, "https://elsewhere.test/earth.jpg", "/textures/../../etc/passwd", 7])
-def test_only_a_slash_textures_name_is_ever_replaced(tmp_path, pyramid, texture):
+@pytest.mark.parametrize("texture", [None, "https://elsewhere.test/earth.jpg", 7])
+def test_only_a_slash_textures_name_is_ever_touched(tmp_path, pyramid, texture):
     client = make_client(tmp_path, pyramid, texture_dir=tmp_path / "textures")
     got = publish(client, bodies=[{"name": "Earth", "texture": texture}])
     assert got["bodies"][0]["texture"] == texture
+
+
+def test_a_slash_textures_name_that_is_not_a_path_component_counts_as_absent(tmp_path):
+    """`/textures/{file}` answers 400 for such a name, so it can never be served: it is dropped."""
+    client = make_client(tmp_path, tmp_path / "never-built", texture_dir=tmp_path / "textures")
+    got = publish(client, bodies=[{"name": "Luna", "texture": "/textures/../../etc/passwd"}])
+    assert got["bodies"][0]["texture"] is None
 
 
 def test_a_hub_built_directly_changes_nothing():
