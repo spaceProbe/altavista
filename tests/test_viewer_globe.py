@@ -604,3 +604,18 @@ def test_globe_tile_mesh_faces_outward_is_upright_sits_on_its_tile_and_is_smooth
         assert cam["uvUpright"] is True and cam["allFlipYFalse"] is True, f"{name}: tiles are not upright: {cam}"
         assert cam["onItsTile"] is True, f"{name}: a vertex lies off its tile: {cam}"
         assert cam["maxFacetDeg"] <= 3.0, f"{name}: a quad spans {cam['maxFacetDeg']} degrees: {cam}"
+
+
+def test_the_level_floor_selects_level_2_by_default_is_clamped_and_yields_to_the_cap(globe_lod_data):
+    """Question 264: at a whole-Earth distance the screen-space error alone stops at level 0 (about 4 px of
+    error, visibly softer than the 2048-px body texture). `selectTiles`' level floor (default 2, whose
+    256 * 2**3 = 2048 px equator is as sharp as that texture) refines below it whatever the SSE: 32 tiles
+    at GEO by default, none with `minLevel: 0`, clamped to `maxLevel`, and still bounded by `maxTiles`.
+    The numbers come from `web/js/globe_lod_check.mjs`, which also asserts them itself."""
+    f = globe_lod_data["floor"]
+    assert f["defaultFloorTiles"] == 32 and f["defaultFloorMaxLevel"] == 2, f
+    assert f["floorOffTiles"] == 2, f
+    assert f["floor2Tiles"] == 32, "the floor costs at most 2 * 4**2 tiles"
+    assert f["clampedMaxLevel"] == 1 and f["clampedTiles"] == 8, f"floor 2 on a level-1 pyramid must stop at level 1: {f}"
+    assert f["clampedToZero"] == 2, f
+    assert f["cappedTiles"] <= 10, f"maxTiles must win below the floor: {f}"

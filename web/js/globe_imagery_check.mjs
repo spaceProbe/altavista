@@ -50,7 +50,9 @@ const SCREEN = { screenHeightPx: 900, fovYRad: (50 * Math.PI) / 180 };
 // A LEO-altitude camera (same class of position globe_lod_check.mjs's own "LEO close-up"
 // step and scene_jitter_harness.mjs's RPO camera use) -- close enough that selectTiles()
 // refines past the two level-0 root tiles, so this harness exercises a real, non-empty,
-// non-trivial tile selection, not just the two roots.
+// non-trivial tile selection, not just the two roots. (Question 264: GlobeLayer's default level
+// floor, 2, with its default maxLevel of 2, now selects all 32 level-2 tiles here, where the
+// screen-space error alone selected 20: the counts printed below are the measured truth, not pins.)
 const CAMERA_ECEF_M = { x: 6900000, y: 500000, z: 800000 };
 const CAMERA_LOCAL_SCENE_UNITS = {
   x: CAMERA_ECEF_M.x * SCENE_UNITS_PER_METRE,

@@ -36,7 +36,7 @@
 // confirms the trajectory numbers are unaffected.
 import * as THREE from 'three';
 import {
-  selectTiles, TileLoadScheduler, tileKey, tileVertexPositions,
+  selectTiles, TileLoadScheduler, tileKey, tileVertexPositions, DEFAULT_MIN_LEVEL,
   WGS84_A_M, WGS84_B_M, SCENE_UNITS_PER_METRE,
 } from './globe_lod.js';
 // Round 4 (docs/open-questions.md question 228 finding 2, "wire the globe through the
@@ -220,6 +220,7 @@ export class GlobeLayer {
     this.sseThreshold = opts.sseThreshold ?? 24;
     this.maxLevel = opts.maxLevel ?? 2;      // kept low by default -- matches the small offline fixture pyramid (web/fixtures/gen_globe_tiles.py); a real tile gateway would raise this.
     this.maxTiles = opts.maxTiles ?? 128;
+    this.minLevel = opts.minLevel ?? DEFAULT_MIN_LEVEL; // the level floor, clamped to maxLevel by selectTiles
     this.segments = opts.segments ?? null; // null: segmentsForLevel(tile.level), see above
     this.group = new THREE.Group();
     this.group.name = 'globe-layer';
@@ -414,7 +415,7 @@ export class GlobeLayer {
       z: cameraLocalPos.z / SCENE_UNITS_PER_METRE,
     };
     const tiles = selectTiles(cameraEcef, {
-      screenHeightPx, fovYRad, sseThreshold: this.sseThreshold, maxLevel: this.maxLevel, maxTiles: this.maxTiles,
+      screenHeightPx, fovYRad, sseThreshold: this.sseThreshold, maxLevel: this.maxLevel, maxTiles: this.maxTiles, minLevel: this.minLevel,
     });
     return { tiles, cameraEcef, screenHeightPx, fovYRad };
   }

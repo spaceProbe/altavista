@@ -771,6 +771,16 @@ async def _globe_proof(chrome_path: str, server: _LiveServer, ref: np.ndarray, v
             if not on["ready"] or not on["meshes"]:
                 problems.append(f"{label}: the globe never settled (meshes {on['meshes']})")
                 continue
+            # The selected level under the disc centre (the first probe is the sub-point): at least level 2
+            # (256 * 2**3 = 2048 px round the equator, as sharp as the plain body's 2048-px texture) at the
+            # default 3.2 R and at 1.5 R, and the finest level (5) at 1.15 R.
+            centre = ((on["pts"][0] or {}).get("hit") or {}).get("tile", [None])[0]
+            if centre is None or not (centre == 5 if radii < 1.3 else centre >= 2):
+                problems.append(
+                    f"{label}: the tile under the centre of the disc is level {centre}, expected "
+                    f"{'5' if radii < 1.3 else 'at least 2'} (level 2 is as sharp as the 2048-px body texture; "
+                    f"the level floor, globe_lod.js DEFAULT_MIN_LEVEL, or the screen-space-error selection is not delivering it)"
+                )
             rows = []
             for k, (probe, p, col) in enumerate(zip(probes, on["pts"], cols_on)):
                 plat, plon, what = probe

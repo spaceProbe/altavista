@@ -192,7 +192,11 @@ if (!/^[0-9a-f]{64}$/.test(manifestSha256)) fail(`manifestSha256 must be 64 lowe
 // keeps `selectTiles()` from ever choosing a level-3+ address this fixture never
 // generated (which would 404, a setup bug this harness would rather fail loudly on
 // than silently tolerate as a "real" HTTP status).
-const SCREEN = { screenHeightPx: 900, fovYRad: (50 * Math.PI) / 180, maxLevel, maxTiles: 64 };
+// `minLevel: 0` (here and on the two GlobeLayers below) pins the level floor (question 264, default 2)
+// off: every number in this harness (how many tiles settle on the path, the eviction the tight budget
+// forces, the dwell sized from observed latency) was measured on the screen-space-error selection, and
+// the floor would pull the whole level-0..2 fixture into every view.
+const SCREEN = { screenHeightPx: 900, fovYRad: (50 * Math.PI) / 180, maxLevel, maxTiles: 64, minLevel: 0 };
 
 function cameraEcef(lonDeg, latDeg, heightM) {
   return geodeticToEcef(lonDeg, latDeg, heightM);
@@ -877,6 +881,7 @@ const globe = new GlobeLayer({
   layerManager: probeManager,
   textureLoader: makeDefaultImageryLoaderStub(),
   maxLevel,
+  minLevel: 0,
   maxTiles: PROBE_MAX_TILES,
   imageryTileBytes: PROBE_IMAGERY_TILE_BYTES,
 });
@@ -1121,6 +1126,7 @@ const globe2 = new GlobeLayer({
   layerManager: probeManager2,
   textureLoader: makeDefaultImageryLoaderStub(),
   maxLevel,
+  minLevel: 0,
   maxTiles: 64,
   imageryTileBytes: PROBE_IMAGERY_TILE_BYTES,
 });
@@ -1162,7 +1168,7 @@ let evictionProbe = { skipped: 'could not establish a live, default-resident tar
     // are resident to make target's room genuinely needed -- the same `setImmediate`
     // yield `driveGlobeUntilSettled` already uses elsewhere in this file.
     const fullTiles = selectTiles(GLOBE_PROBE_CAMERA_ECEF_M, {
-      screenHeightPx: SCREEN.screenHeightPx, fovYRad: SCREEN.fovYRad, sseThreshold: globe2.sseThreshold, maxLevel, maxTiles: 64,
+      screenHeightPx: SCREEN.screenHeightPx, fovYRad: SCREEN.fovYRad, sseThreshold: globe2.sseThreshold, maxLevel, maxTiles: 64, minLevel: globe2.minLevel,
     });
     const reducedTiles = fullTiles.filter((t) => tileKeyOf(t) !== targetKey);
     const reducedView = {

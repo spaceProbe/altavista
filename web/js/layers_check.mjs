@@ -248,7 +248,10 @@ const CAMERA_PATH = [
   { label: 'far-2', eastM: 0, northM: 0, upM: 3000000 },
 ];
 
-const IMG_SCREEN = { screenHeightPx: 900, fovYRad: (50 * Math.PI) / 180, sseThreshold: 24, maxLevel: 4, maxTiles: 60 };
+// `minLevel: 0` pins the level floor (question 264, default 2) off: the cancellation and eviction
+// counts below are about tiles dropping out of a screen-space-error selection as the camera jumps,
+// and a floor keeps the same 32 coarse tiles selected through every jump.
+const IMG_SCREEN = { screenHeightPx: 900, fovYRad: (50 * Math.PI) / 180, sseThreshold: 24, maxLevel: 4, maxTiles: 60, minLevel: 0 };
 const T3D_SCREEN = { screenHeightPx: 900, fovYRad: (50 * Math.PI) / 180, sseThreshold: 16, maxLevel: 12, maxTiles: 512 };
 
 // See this file's module docstring for exactly how this value was chosen (strictly

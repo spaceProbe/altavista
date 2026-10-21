@@ -140,6 +140,10 @@ const CAMERAS = {
   mid: { x: 9567000, y: 1200000, z: 2400000 },
   leo: { x: 6900000, y: 500000, z: 800000 },
 };
+// `far0` is the far camera with the level floor off (`minLevel: 0`): the two level-0 roots, whose
+// quads are the largest and so the ones the facet bound is about. With the default floor (2) the
+// far camera selects level 2 tiles instead (`far`).
+const FAR_ROOTS = { name: 'far0', cam: CAMERAS.far, opts: { minLevel: 0 } };
 
 const result = { cameras: {}, breaks: {} };
 const failures = [];
@@ -150,8 +154,9 @@ function assertBound(name, ok, measured, bound) {
 }
 
 const allLevels = new Set();
-for (const [name, cam] of Object.entries(CAMERAS)) {
-  const meshes = meshesFor(cam);
+const RUNS = [...Object.entries(CAMERAS).map(([name, cam]) => ({ name, cam, opts: {} })), FAR_ROOTS];
+for (const { name, cam, opts } of RUNS) {
+  const meshes = meshesFor(cam, opts);
   const levels = [...new Set(meshes.map((m) => m.userData.tile.level))].sort();
   levels.forEach((l) => allLevels.add(l));
   let worstOutward = 1, uvOk = true, tileOk = true, facet = 0, flipYAll = true, bound = 0;
@@ -184,7 +189,7 @@ assertBound('BREAKS: a mesh with v mirrored is not upright', result.breaks.mirro
 const rawTex = new THREE.Texture();
 result.breaks.untouchedTextureFlipY = rawTex.flipY;
 assertBound('BREAKS: a bare TextureLoader-style texture has flipY true until applyTileTexture runs', rawTex.flipY === true, rawTex.flipY, 'true');
-const coarse = meshesFor(CAMERAS.far, { segments: 8 });
+const coarse = meshesFor(CAMERAS.far, { segments: 8, minLevel: 0 });
 const coarseFacet = Math.max(...coarse.map((m) => maxFacetDeg(m.geometry)));
 result.breaks.coarseFacetDeg = coarseFacet;
 assertBound('BREAKS: the old fixed 8 segments gave a facet far above the bound at level 0', coarseFacet > 10, coarseFacet.toFixed(1), '> 10');

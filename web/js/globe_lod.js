@@ -225,6 +225,8 @@ export function screenSpaceErrorPx(tile, cameraEcef, screenHeightPx, fovYRad) {
 
 // ------------------------------------------------------------------- tile selection
 const ROOT_TILES = [{ level: 0, x: 0, y: 0 }, { level: 0, x: 1, y: 0 }];
+/** Level 2 is 256 * 2^(2+1) = 2048 px across the equator: as sharp as the plain body's 2048-px texture. */
+export const DEFAULT_MIN_LEVEL = 2;
 
 /**
  * Select the set of tiles to render for `cameraEcef`, by camera distance and
@@ -247,7 +249,7 @@ const ROOT_TILES = [{ level: 0, x: 0, y: 0 }, { level: 0, x: 1, y: 0 }];
  * dependence on Map/Set insertion accidents").
  *
  * @param {{x:number,y:number,z:number}} cameraEcef
- * @param {{screenHeightPx?: number, fovYRad?: number, sseThreshold?: number, maxLevel?: number, maxTiles?: number}} [opts]
+ * @param {{screenHeightPx?: number, fovYRad?: number, sseThreshold?: number, maxLevel?: number, maxTiles?: number, minLevel?: number}} [opts]
  * @returns {Tile[]}
  */
 export function selectTiles(cameraEcef, opts = {}) {
@@ -257,14 +259,22 @@ export function selectTiles(cameraEcef, opts = {}) {
     sseThreshold = 16,
     maxLevel = 12,
     maxTiles = 512,
+    minLevel = DEFAULT_MIN_LEVEL,
   } = opts;
+  // The level floor (question 264): below it a tile is refined whatever its screen-space error,
+  // because at a whole-Earth distance the SSE rule alone stops at level 0 (about 4 px of error, a
+  // visibly soft Earth under a real basemap). Clamped to maxLevel, so a source with a shallower
+  // pyramid is never asked for a level it does not have. Floor refinement still goes through
+  // `canRefine`, so the maxTiles cap wins if it would bind: the floor costs at most 2 * 4^floor
+  // tiles (32 at the default of 2), fewer when the cap is lower.
+  const floorLevel = Math.min(minLevel, maxLevel);
   const selected = [];
   const queue = [...ROOT_TILES];
   while (queue.length) {
     const tile = queue.shift();
     const sse = screenSpaceErrorPx(tile, cameraEcef, screenHeightPx, fovYRad);
     const canRefine = tile.level < maxLevel && (selected.length + queue.length + 4) <= maxTiles;
-    if (sse > sseThreshold && canRefine) queue.push(...tileChildren(tile));
+    if ((sse > sseThreshold || tile.level < floorLevel) && canRefine) queue.push(...tileChildren(tile));
     else selected.push(tile);
   }
   selected.sort(compareTiles);

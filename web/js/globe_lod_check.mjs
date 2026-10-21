@@ -37,7 +37,12 @@
 //     screen/FOV settings.
 import { selectTiles, TileLoadScheduler, geodeticToEcef, tileKey } from './globe_lod.js';
 
-const SCREEN = { screenHeightPx: 900, fovYRad: (50 * Math.PI) / 180, sseThreshold: 40, maxLevel: 6, maxTiles: 300 };
+// `minLevel: 0` pins the level floor OFF for the path below: its numbers (the GEO step selecting only
+// the two roots, maxResidentObserved against a budget of 32) are about the screen-space-error
+// selection and the scheduler BELOW the floor. selectTiles' default floor (question 264, level 2:
+// 32 tiles even at GEO) would change them without testing anything new about either. The floor
+// itself is checked in the "floor" section at the bottom.
+const SCREEN = { screenHeightPx: 900, fovYRad: (50 * Math.PI) / 180, sseThreshold: 40, maxLevel: 6, maxTiles: 300, minLevel: 0 };
 
 // A fixed, scripted camera path (geodetic lon/lat degrees, altitude metres above the
 // WGS84 surface) -- deliberately includes a far (GEO-altitude) step, a close LEO
@@ -126,6 +131,30 @@ assertBound('evictedCount > 0 (eviction actually ran)', result.evictedCount > 0,
 assertBound('cancelledCount > 0 (stale loads cancelled on camera jump)', result.cancelledCount > 0, result.cancelledCount, '> 0');
 assertBound('maxLevelFar < maxLevelNear', result.maxLevelFar < result.maxLevelNear, result.maxLevelFar, `< ${result.maxLevelNear}`);
 assertBound('maxLevelFar == 0 (GEO step selects only the roots)', result.maxLevelFar === 0, result.maxLevelFar, '== 0');
+
+// ---------------------------------------------------------------------------------- floor
+// The level floor (question 264). GEO camera, the SCREEN settings otherwise as above.
+const geo = geodeticToEcef(-75, 20, 35786000);
+const sel = (o) => selectTiles(geo, { ...SCREEN, ...o });
+const maxLvl = (t) => t.reduce((m, q) => Math.max(m, q.level), 0);
+result.floor = {
+  defaultFloorTiles: selectTiles(geo, { ...SCREEN, minLevel: undefined }).length, // omitted -> DEFAULT_MIN_LEVEL
+  defaultFloorMaxLevel: maxLvl(selectTiles(geo, { ...SCREEN, minLevel: undefined })),
+  floorOffTiles: sel({ minLevel: 0 }).length,
+  floor2Tiles: sel({ minLevel: 2 }).length,
+  clampedMaxLevel: maxLvl(sel({ minLevel: 2, maxLevel: 1 })),      // floor 2 on a level-1 pyramid -> level 1
+  clampedTiles: sel({ minLevel: 2, maxLevel: 1 }).length,
+  clampedToZero: sel({ minLevel: 5, maxLevel: 0 }).length,          // maxLevel 0 -> just the two roots
+  cappedTiles: sel({ minLevel: 2, maxTiles: 10 }).length,           // the cap wins below the floor
+  cappedMaxLevel: maxLvl(sel({ minLevel: 2, maxTiles: 10 })),
+};
+const F = result.floor;
+assertBound('floor: the default floor is level 2 (32 tiles at GEO)', F.defaultFloorTiles === 32 && F.defaultFloorMaxLevel === 2, `${F.defaultFloorTiles} tiles, max level ${F.defaultFloorMaxLevel}`, '32 tiles, level 2');
+assertBound('floor: minLevel 0 turns it off (the two roots at GEO)', F.floorOffTiles === 2, F.floorOffTiles, '== 2');
+assertBound('floor: the floor costs at most 2 * 4^2 = 32 tiles', F.floor2Tiles === 32, F.floor2Tiles, '== 32');
+assertBound('floor: clamped to maxLevel (minLevel 2, maxLevel 1 selects level 1 only)', F.clampedMaxLevel === 1 && F.clampedTiles === 8, `level ${F.clampedMaxLevel}, ${F.clampedTiles} tiles`, 'level 1, 8 tiles');
+assertBound('floor: clamped to maxLevel 0 (the two roots)', F.clampedToZero === 2, F.clampedToZero, '== 2');
+assertBound('floor: maxTiles wins below the floor (cap 10)', F.cappedTiles <= 10 && F.cappedMaxLevel <= 1, `${F.cappedTiles} tiles, max level ${F.cappedMaxLevel}`, '<= 10 tiles, a level below the floor');
 
 for (const line of failures) process.stderr.write(`${line}\n`);
 process.stderr.write(

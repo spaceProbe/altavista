@@ -376,7 +376,9 @@ export function enableGlobeForMeasurement(viewer, bodyName) {
   // (`segmentsForLevel` in globe.js: about 2.8-degree facets instead of 22.5), which changes WHICH
   // vertices lie nearest the camera, so the pinned "globe" class would no longer compare like with
   // like; what this check measures is float32 placement of a vertex, which does not depend on it.
-  const ok = viewer.enableGlobe(bodyName, { textureLoader: stubTextureLoader, segments: 8 });
+  // `minLevel: 0` likewise pins the level floor (question 264, default 2) off: with it the tile set
+  // nearest the camera, and so the nearest vertices the pinned numbers were measured on, would change.
+  const ok = viewer.enableGlobe(bodyName, { textureLoader: stubTextureLoader, segments: 8, minLevel: 0 });
   disableBodyCulling(viewer);
   return ok;
 }

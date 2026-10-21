@@ -95,7 +95,7 @@ function makeLoader() {
 function makeRig({ budgetBytes, imageryTileBytes, maxConcurrentLoads = 64 }) {
   const manager = new LayerManager({ memoryBudgetBytes: budgetBytes, maxConcurrentLoads });
   const loader = makeLoader();
-  const globe = new GlobeLayer({ layerManager: manager, textureLoader: loader, imageryTileBytes });
+  const globe = new GlobeLayer({ layerManager: manager, textureLoader: loader, imageryTileBytes, minLevel: 0 });
   manager.removeLayer('terrain'); // see this file's module docstring
   const markerAdapter = new MarkerLayerAdapter({ id: MARKER_ID });
   const trailAdapter = new TrailLayerAdapter({ id: TRAIL_ID });
@@ -198,8 +198,11 @@ const names = ENTITIES.map((e) => e.name);
 const sortedNames = [...names].sort();
 
 // ------------------------------------------------------------------- rig preconditions
-const wantedFar = selectTiles(FAR_ECEF_M, { screenHeightPx: SCREEN_H, fovYRad: FOV, sseThreshold: 24, maxLevel: 2, maxTiles: 128 });
-const wantedNear = selectTiles(NEAR_ECEF_M, { screenHeightPx: SCREEN_H, fovYRad: FOV, sseThreshold: 24, maxLevel: 2, maxTiles: 128 });
+// `minLevel: 0` (here and on the rig's GlobeLayer, below) pins the level floor (question 264, default
+// 2) off: this rig's premise is a far camera that wants 2 tiles and a near one that wants 20, the
+// screen-space-error selection; the floor would give both the same 32 and leave nothing to compare.
+const wantedFar = selectTiles(FAR_ECEF_M, { screenHeightPx: SCREEN_H, fovYRad: FOV, sseThreshold: 24, maxLevel: 2, maxTiles: 128, minLevel: 0 });
+const wantedNear = selectTiles(NEAR_ECEF_M, { screenHeightPx: SCREEN_H, fovYRad: FOV, sseThreshold: 24, maxLevel: 2, maxTiles: 128, minLevel: 0 });
 check('rig_farCameraWantsFewTilesNearCameraWantsMany', wantedFar.length === 2 && wantedNear.length === 20, {
   far: wantedFar.length, near: wantedNear.length,
 });
