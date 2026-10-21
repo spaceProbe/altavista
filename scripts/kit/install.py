@@ -81,6 +81,23 @@ matches and the option to pass); `--gmat-variant` on a platform with one pin is 
 install time over what the pin covers (`not_covered` in the pin component, repeated in the record);
 it does not prove the tree is unchanged afterwards.
 
+# The Blue Marble basemap is carried and verified here (question 264)
+
+A kit built with `--copy-pack imagery-bluemarble` carries the Blue Marble tile pyramid under
+`packs/imagery-bluemarble/` (public domain; `docs/kit-operator-supplied.md`, "What the kit carries itself").
+It is not an operator-supplied item. `verify_carried_imagery` checks it before the target directory exists:
+every file against the pyramid's own `manifest.json` (`manifest.verify_imagery_pyramid`, the function the
+builder used), and the pyramid's `pyramid_sha256` and counts against what `KIT_MANIFEST.packs.imagery-bluemarble`
+recorded. A mismatch is a typed refusal (`imagery-*` codes, exit 2). The whole kit tree is copied to
+`<target>/kit/`, so the pyramid lands at `<target>/kit/packs/imagery-bluemarble/`; it is verified again
+there, and `INSTALL_RECORD.installed.imagery` says where and how to start the viewer on it:
+
+    <target>/venv/bin/python -m altavista serve --imagery-dir <target>/kit/packs/imagery-bluemarble
+
+The installer does not start the viewer, so the flag is the operator's to pass. A kit built without the pack
+installs as before (`carried: false` in the record): the viewer, started without a pyramid, says the basemap
+is not installed.
+
 # Every operator-supplied component is listed, the ones this step can reach are verified (question 250(a), task 3)
 
 `docs/kit-operator-supplied.md` lists six components; `operator_check.py` (its module doc is the
@@ -332,6 +349,16 @@ class OperatorSuppliedRefused(InstallRefused):
         self.code = code
 
 
+class ImageryRefused(InstallRefused):
+    """An `InstallRefused` about the carried Blue Marble pyramid (module doc, "The Blue Marble basemap"), with
+    a stable `code`: `imagery-pack-missing`, `imagery-descriptor-malformed`, `imagery-pyramid-differs`,
+    `imagery-descriptor-differs`."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+
+
 def _normalize_dist_name(name: str) -> str:
     return name.lower().replace("_", "-")
 
@@ -505,6 +532,80 @@ def _copy_kit_tree(kit_dir: Path, target_dir: Path) -> Path:
     dest = target_dir / "kit"
     shutil.copytree(kit_dir, dest, symlinks=True)
     return dest
+
+
+def _verify_imagery_tree(root: Path, entry: dict, where: str) -> dict:
+    """The pyramid at `root` against its own manifest and against what the kit's descriptor recorded; returns
+    the facts verified, or raises `ImageryRefused`. `where` says which copy (the kit's, then the installed one)."""
+    recorded = entry.get("imagery")
+    if not isinstance(recorded, dict) or not recorded.get("pyramid_sha256"):
+        raise ImageryRefused(
+            "imagery-descriptor-malformed",
+            f"KIT_MANIFEST.packs.{kit_manifest.IMAGERY_PACK} has no imagery descriptor with a pyramid_sha256 -- "
+            f"not a descriptor this builder wrote",
+        )
+    tail = "nothing was installed" if where == "in the kit" else "the target holds a partial install: remove it and retry"
+    if not root.is_dir():
+        raise ImageryRefused("imagery-pack-missing", f"{where}: {root} is not a directory, but the kit says it carries it")
+    problems = kit_manifest.verify_imagery_pyramid(root)
+    if problems:
+        raise ImageryRefused(
+            "imagery-pyramid-differs",
+            f"{where}: the Blue Marble pyramid does not match its own manifest.json "
+            f"({kit_manifest.imagery_problems_message(problems)}); {tail}",
+        )
+    found = kit_manifest.read_imagery_manifest(root)
+    differs = [k for k, have in (
+        ("pyramid_sha256", found["pyramid_sha256"]), ("file_count", len(found["files"])),
+        ("total_bytes", found["total_bytes"]),
+    ) if recorded.get(k) != have]
+    if differs:
+        raise ImageryRefused(
+            "imagery-descriptor-differs",
+            f"{where}: the pyramid's manifest disagrees with KIT_MANIFEST.packs.{kit_manifest.IMAGERY_PACK}.imagery "
+            f"on {differs} (recorded pyramid_sha256 {recorded.get('pyramid_sha256')}, found {found['pyramid_sha256']}); "
+            f"{tail}",
+        )
+    return {"pyramid_sha256": found["pyramid_sha256"], "file_count": len(found["files"]),
+            "total_bytes": found["total_bytes"], "max_level": found["max_level"]}
+
+
+def verify_carried_imagery(kit_dir: Path, doc: dict) -> "dict | None":
+    """Module doc, "The Blue Marble basemap". `None` when the kit does not carry the pyramid's bytes (no pack, or
+    a descriptor-only pack); otherwise the facts verified in the kit, or `ImageryRefused`."""
+    entry = doc["packs"].get(kit_manifest.IMAGERY_PACK)
+    if entry is None or not entry.get("copied"):
+        return None
+    return _verify_imagery_tree(kit_dir / "packs" / kit_manifest.IMAGERY_PACK, entry, "in the kit")
+
+
+def _imagery_record(doc: dict, verified_in_kit: "dict | None", installed_kit_dir: "Path | None") -> dict:
+    """`INSTALL_RECORD.installed.imagery`: whether the pyramid was carried and verified, where it is, and the
+    flag the operator starts the viewer with. Re-verifies the installed copy (a byte copy of files just hashed,
+    20 MB for the real pyramid, so cheap)."""
+    if verified_in_kit is None:
+        entry = doc["packs"].get(kit_manifest.IMAGERY_PACK)
+        return {
+            "carried": False,
+            "reason": ("this kit was built without --copy-pack imagery-bluemarble"
+                       if entry is None else "this kit records the pyramid's descriptor only (--with-pack), not its bytes"),
+            "effect": "the viewer, started without a pyramid, says the basemap is not installed",
+            "add_it": "rebuild the kit with --copy-pack imagery-bluemarble, or build the pyramid with "
+                      "scripts/imagery/build_blue_marble_tiles.py and start the viewer with --imagery-dir DIR",
+        }
+    assert installed_kit_dir is not None
+    entry = doc["packs"][kit_manifest.IMAGERY_PACK]
+    again = _verify_imagery_tree(installed_kit_dir / "packs" / kit_manifest.IMAGERY_PACK, entry, "after the copy")
+    return {
+        "carried": True,
+        "verified_in_kit": True,
+        "verified_after_copy": True,
+        **again,
+        "installed_path": f"kit/packs/{kit_manifest.IMAGERY_PACK}",
+        "start_viewer_with": f"<target>/venv/bin/python -m altavista serve --imagery-dir <target>/kit/packs/{kit_manifest.IMAGERY_PACK}",
+        "licence": entry["imagery"].get("licence"),
+        "licence_spdx": entry["imagery"].get("licence_spdx"),
+    }
 
 
 def _make_binaries_executable(installed_kit_dir: Path) -> list[str]:
@@ -797,10 +898,13 @@ def install(
         doc, gmat_root=gmat_root, gmat_platform=gmat_platform, pins_file=pins_file, out=out,
         operator_wheels=operator_wheels, gmat_variant=gmat_variant,
     )
+    # Question 264: the carried Blue Marble pyramid is verified before the target directory exists, too.
+    imagery_in_kit = verify_carried_imagery(kit_dir, doc)
     _check_target_dir(target_dir)
 
     operator_wheels_staged = _stage_operator_wheels(operator_results, target_dir)
     installed_kit_dir = _copy_kit_tree(kit_dir, target_dir)
+    imagery_record = _imagery_record(doc, imagery_in_kit, installed_kit_dir)  # the installed copy, before the slow steps
     binaries_made_executable = _make_binaries_executable(installed_kit_dir)
     if operator_wheels_staged:
         wheels_info = _install_wheels_into_venv(
@@ -847,6 +951,7 @@ def install(
         "gaps": doc["gaps"],
     }
     record["installed"]["images"] = _images_record(doc, kit_manifest_sha256)
+    record["installed"]["imagery"] = imagery_record
     # One entry per component of the pins file, each the result of its own verification function.
     record["installed"]["operator_supplied"] = _operator_supplied_record(operator_results, doc, gmat_root, gmat_variant)
     # Question 260: the files install does not decide the MoE store; the image step does.
@@ -928,6 +1033,13 @@ def main(argv: "list[str] | None" = None) -> int:
     for w in record["installed"]["operator_wheels"]:
         print(f"operator-supplied wheel {w['filename']} (sha256:{w['sha256'][:12]}…) verified and installed from {w['installed_from']}")
     print(operator_check.render_moe_store(record["installed"]["moe_store"]))
+    imagery = record["installed"]["imagery"]
+    if imagery["carried"]:
+        print(f"Blue Marble basemap verified ({imagery['file_count']} files, pyramid_sha256 {imagery['pyramid_sha256'][:12]}…); "
+              f"start the viewer with: {args.target_dir.resolve() / 'venv' / 'bin' / 'python'} -m altavista serve "
+              f"--imagery-dir {args.target_dir.resolve() / imagery['installed_path']}")
+    else:
+        print(f"Blue Marble basemap not carried by this kit ({imagery['reason']}); the viewer will say the basemap is not installed")
     print(f"wrote {args.target_dir / 'INSTALL_RECORD'}")
     return 0
 

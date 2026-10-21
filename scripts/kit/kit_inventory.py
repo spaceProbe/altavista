@@ -361,6 +361,10 @@ def origin_of(kit: Path, doc: dict, entry: dict, py_licences: dict, vendor_cache
             return "AltaVista source (the viewer's own wheel)"
         return f"Python wheel {wheel['name']} {wheel['version']}, SBOM licence: {py_licences.get(_norm_name(wheel['name']), 'not in the viewer SBOM')}"
     if role == "pack-file":
+        imagery = (doc["packs"].get(parts[1]) or {}).get("imagery")
+        if imagery:   # question 264: the pyramid is data, not code; its licence is listed with it
+            return (f"copied pack {parts[1]} (NASA Blue Marble Next Generation tiles, derived from the original "
+                    f"sha256 {imagery['original']['sha256'][:12]}...; {imagery['licence']}; {imagery['licence_spdx']}; no copyleft)")
         return f"copied pack {parts[1]} (AltaVista's own data: data/time leap-second table)" if parts[1] == "data-time" else f"copied pack {parts[1]}"
     if role == "image-dockerfile":
         return f"AltaVista source (runtime Dockerfile of {parts[1]})"

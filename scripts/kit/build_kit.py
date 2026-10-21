@@ -42,6 +42,11 @@ GATED, opt-in, off by default:
   250(a), task 2): GMAT is operator-supplied, `--with-pack gmat` records its descriptor. Round 2 also copied `web`/
   `profiles` this same way, unconditionally, never gated behind this flag; round 3 removed both
   packs outright (see above) -- the `altavista` wheel carries them now.
+- `--copy-pack imagery-bluemarble [--imagery-dir DIR]` -- question 264: the Blue Marble tile pyramid, the
+  one pack whose source is OUTSIDE the repository (default `~/altavista-data/imagery/bluemarble`, from
+  `Path.home()`). Verified against its own `manifest.json` first and refused on a mismatch, an incomplete
+  pyramid or a size over `--max-pack-bytes`; the original (27 MB) is not carried. `--with-pack` records the
+  verified descriptor only. See `manifest.imagery_pack_descriptor`.
 - `--with-vendor` -- round 2: `cargo vendor --offline` (falling back to the network exactly once
   if genuinely necessary, question 154's one exception) into `<kit>/vendor/`.
 - `--with-wheels` -- round 2: the viewer's real runtime dependency wheels, pinned to this
@@ -108,6 +113,13 @@ import wheel_libs  # noqa: E402  (question 250(a): the wheel step's inventory of
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 DEFAULT_SITE = Path("deploy") / "secdeploy" / "secsite.altavista-eval.toml"
+
+
+def default_imagery_dir() -> Path:
+    """Question 264: where `scripts/imagery/build_blue_marble_tiles.py` writes the Blue Marble pyramid by
+    default, and where the viewer's `--imagery-dir` looks. Outside the repository, under the home directory
+    (`Path.home()`, never an environment variable of ours: question 199)."""
+    return Path.home() / "altavista-data" / "imagery" / "bluemarble"
 MERGE_FRAGMENT = Path("deploy") / "secdeploy" / "suite.altavista.toml"
 SBOM_SOURCE_DIR = Path("docs") / "compliance" / "sbom"
 RUN_FIXTURES_DIR = Path("tests") / "fixtures"
@@ -1090,6 +1102,7 @@ def build(
     with_pack_names: list[str] | None = None,
     copy_pack_names: list[str] | None = None,
     max_pack_bytes: int = kit_manifest.DEFAULT_MAX_PACK_BYTES,
+    imagery_dir: Path | None = None,
     with_vendor: bool = False,
     with_wheels: bool = False,
     with_binaries: bool = False,
@@ -1099,7 +1112,10 @@ def build(
     manifest_sha256)` -- the sha256 is computed AFTER writing, never embedded in the manifest
     itself (Decision L). `declare_operator_supplied` names service images (Versity Gateway, PostGIS, ClickHouse) the
     receiving site supplies itself; recorded in `KIT_MANIFEST.operator_supplied_declared`, refused
-    before anything is written if a name is not a declarable pin (`operator_check.declaration_problems`)."""
+    before anything is written if a name is not a declarable pin (`operator_check.declaration_problems`).
+    `imagery_dir` (question 264) is where the Blue Marble pyramid lives, for `imagery-bluemarble` in
+    `with_pack_names`/`copy_pack_names`; it defaults to `default_imagery_dir()` and is refused when that
+    pack is not requested (a flag that would do nothing)."""
     kit_root = out
     if kit_root.exists() and any(kit_root.iterdir()):
         raise RuntimeError(f"--out {kit_root} already exists and is not empty -- pass an empty or new directory")
@@ -1123,6 +1139,31 @@ def build(
             f"installer verifies the operator's own copy against the pin in "
             f"scripts/kit/operator_supplied.json (--gmat-root, --gmat-platform)"
         )
+    # Round 2 task 3c unioned `web`/`profiles` into every kit's copy set here, unconditionally.
+    # Round 3 (question 217(b)) removed both packs -- the `altavista` wheel carries them now (see
+    # manifest.py's own top doc) -- so nothing is unioned in any more; a caller's own explicit
+    # `--copy-pack` request is still honoured for every other pack exactly as before.
+    pack_names = list(dict.fromkeys([kit_manifest.DEFAULT_PACK, *(with_pack_names or []), *copy_set]))
+    known_packs = sorted({*kit_manifest.PACKS, *kit_manifest.EXTERNAL_PACKS})
+    unknown_packs = [n for n in pack_names if n not in known_packs]
+    if unknown_packs:
+        raise ValueError(f"unknown pack(s) {unknown_packs!r} -- known packs: {known_packs}")
+
+    # Question 264: the pyramid is verified against its own manifest and measured against --max-pack-bytes
+    # here, before anything is written, so a mismatch or an incomplete pyramid leaves no half-built kit.
+    imagery_source: Path | None = None
+    imagery_desc: dict | None = None
+    if kit_manifest.IMAGERY_PACK in pack_names:
+        imagery_source = imagery_dir if imagery_dir is not None else default_imagery_dir()
+        imagery_desc = kit_manifest.imagery_pack_descriptor(
+            kit_manifest.IMAGERY_PACK, imagery_source, max_pack_bytes=max_pack_bytes,
+        )
+    elif imagery_dir is not None:
+        raise kit_manifest.ImageryPyramidError(
+            f"--imagery-dir names the source of the {kit_manifest.IMAGERY_PACK!r} pack, which this build does not "
+            f"include: pass --copy-pack {kit_manifest.IMAGERY_PACK} (or --with-pack for the descriptor only)"
+        )
+
     # Question 250(a): every refusal that needs no Docker (pins, Dockerfiles, the recorded `.deb`'s
     # hash) happens before a single byte is written into the kit.
     prepared_images = prepare_images(repo_root) if with_images else None
@@ -1135,21 +1176,15 @@ def build(
     assemble_image_digest_docs(repo_root, kit_root)
     runs = assemble_runs(repo_root, kit_root)
 
-    # Round 2 task 3c unioned `web`/`profiles` into every kit's copy set here, unconditionally.
-    # Round 3 (question 217(b)) removed both packs -- the `altavista` wheel carries them now (see
-    # manifest.py's own top doc) -- so nothing is unioned in any more; a caller's own explicit
-    # `--copy-pack` request is still honoured for every other pack exactly as before.
-    pack_names = list(dict.fromkeys([kit_manifest.DEFAULT_PACK, *(with_pack_names or []), *copy_set]))
-    unknown_packs = [n for n in pack_names if n not in kit_manifest.PACKS]
-    if unknown_packs:
-        raise ValueError(f"unknown pack(s) {unknown_packs!r} -- known packs: {sorted(kit_manifest.PACKS)}")
-
     packs: dict[str, dict] = {}
     for name in pack_names:
-        source_path = repo_root / kit_manifest.PACKS[name]
-        desc = kit_manifest.pack_descriptor(
-            name, source_path, repo_root=repo_root, max_pack_bytes=max_pack_bytes,
-        )
+        if name == kit_manifest.IMAGERY_PACK:
+            source_path, desc = imagery_source, imagery_desc
+        else:
+            source_path = repo_root / kit_manifest.PACKS[name]
+            desc = kit_manifest.pack_descriptor(
+                name, source_path, repo_root=repo_root, max_pack_bytes=max_pack_bytes,
+            )
         if name in copy_set:
             copy_result = kit_manifest.copy_pack_bytes(name, source_path, kit_root)
             desc["copied"] = True
@@ -1235,7 +1270,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--with-pack", action="append", default=[], dest="with_pack",
         help=f"repeatable: include an additional Decision-K pack DESCRIPTOR beyond the default "
-             f"{kit_manifest.DEFAULT_PACK!r}. Known packs: {sorted(kit_manifest.PACKS)}",
+             f"{kit_manifest.DEFAULT_PACK!r}. Known packs: {sorted({*kit_manifest.PACKS, *kit_manifest.EXTERNAL_PACKS})}",
     )
     p.add_argument(
         "--copy-pack", action="append", default=[], dest="copy_pack",
@@ -1244,6 +1279,14 @@ def build_parser() -> argparse.ArgumentParser:
              "Refused for gmat, which is operator-supplied (use --with-pack gmat). "
              "Nothing is copied unconditionally any more (round 3, question 217(b), removed the "
              "web/profiles packs that once were) -- pass it explicitly for any pack you want.",
+    )
+    p.add_argument(
+        "--imagery-dir", type=Path, default=None, metavar="DIR",
+        help=f"question 264: the Blue Marble tile pyramid that --copy-pack {kit_manifest.IMAGERY_PACK} copies "
+             f"(--with-pack: records its descriptor), outside the repository; default {default_imagery_dir()} "
+             f"(build it with scripts/imagery/build_blue_marble_tiles.py). It is verified against its own "
+             f"manifest.json first; a mismatch, an incomplete pyramid or a size over --max-pack-bytes is "
+             f"refused. Refused when {kit_manifest.IMAGERY_PACK} is not requested.",
     )
     p.add_argument(
         "--max-pack-bytes", type=int, default=kit_manifest.DEFAULT_MAX_PACK_BYTES,
@@ -1295,12 +1338,14 @@ def main(argv: list[str] | None = None) -> int:
             with_pack_names=list(args.with_pack),
             copy_pack_names=list(args.copy_pack),
             max_pack_bytes=args.max_pack_bytes,
+            imagery_dir=(None if args.imagery_dir is None else args.imagery_dir.expanduser().resolve()),
             with_vendor=args.with_vendor,
             with_wheels=args.with_wheels,
             with_binaries=args.with_binaries,
             declare_operator_supplied=list(args.declare_operator_supplied),
         )
-    except (kit_manifest.OperatorSuppliedPackError, wheel_libs.BundledLibraryRefused) as e:
+    except (kit_manifest.OperatorSuppliedPackError, kit_manifest.ImageryPyramidError,
+            kit_manifest.PackTooLargeError, wheel_libs.BundledLibraryRefused) as e:
         print(f"scripts/kit/build_kit.py: REFUSED -- {e}", file=sys.stderr)
         return 2
     print(f"wrote kit to {manifest_path.parent}")

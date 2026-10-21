@@ -77,7 +77,7 @@ Flags:
   pinned `.deb` first (the network note below).
 - `--with-pack <name>` (repeatable) -- include an additional Decision-K pack DESCRIPTOR beyond
   the default, `data-time`. Known packs: `data-time`, `gmat`, `mirrors`, `cspice`, `cfs`
-  (`scripts/kit/manifest.py`'s `PACKS`). Only the descriptor (a name, where it resolves, a
+  (`scripts/kit/manifest.py`'s `PACKS`), and `imagery-bluemarble` (`EXTERNAL_PACKS`, below). Only the descriptor (a name, where it resolves, a
   content hash, a file count, a byte count) is recorded. For `gmat` this is the only way in (see
   "GMAT is operator-supplied") and the entry also carries an `operator_supplied` marker. Round 2 task 3c added `web` and
   `profiles` here too (the viewer's own static assets and profile/policy store, copied in EVERY
@@ -97,6 +97,16 @@ Flags:
   operator-supplied. Refused rather than accepted as a synonym because the flag's name promises
   bytes, and a build script that still passes it would otherwise get a kit without GMAT and no
   failure at the point where it matters.
+- `--imagery-dir <DIR>` -- **question 264**: the Blue Marble tile pyramid (public domain; the
+  basemap of the globe and the 2D map) that `--copy-pack imagery-bluemarble` copies to
+  `<kit>/packs/imagery-bluemarble/` (`--with-pack imagery-bluemarble` records the descriptor only). It lives
+  outside the repository, default `~/altavista-data/imagery/bluemarble` (`Path.home()`; build it with
+  `scripts/imagery/build_blue_marble_tiles.py`). The builder verifies it against its own `manifest.json` first
+  and refuses a mismatch, an incomplete pyramid or a size over `--max-pack-bytes` (exit 2, nothing written);
+  the installer verifies it again and prints the `--imagery-dir` the installed viewer is started with
+  (`<target>/kit/packs/imagery-bluemarble`; the kit does not start the viewer). 20.6 MB, under the unchanged
+  50 MB cap; the 27 MB original is not carried. `docs/kit-operator-supplied.md`, "What the kit carries
+  itself", has the hash, the licence and how a site rebuilds it.
 - `--max-pack-bytes <n>` -- refuse (never silently skip) any `--with-pack`/`--copy-pack` pack
   whose total size exceeds this. Default 50,000,000 bytes -- comfortably above the small in-tree
   `data-time` pack, well below the ~770 MB `gmat` tree, so recording GMAT's descriptor (which hashes

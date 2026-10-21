@@ -344,6 +344,40 @@ proof runs the files install in a `python:3.13-slim` container.
   Apache-2.0.
 - **CSPICE headers (`cspice` pack, 37 files).** NAIF's terms, not copyleft.
 - **Time data (`data-time` pack).** AltaVista's own leap-second table.
+- **The Blue Marble tile pyramid (`imagery-bluemarble` pack, question 264; public domain, not
+  operator-supplied).** The basemap of the globe and the 2D map: NASA's Blue Marble Next Generation
+  (July 2004, topography and bathymetry) cut into 256x256 JPEG tiles, levels 0 to 5, plus the whole-Earth
+  image the plain Earth body uses. 2,731 files, **20,600,766 bytes** (2,732 files and 20,934,142 bytes with
+  the pyramid's own `manifest.json`, the pack's measured size against the unchanged 50,000,000 byte
+  `--max-pack-bytes` cap), `pyramid_sha256`
+  `58b59438e50ef5ccf454bf96847a3f60b022a1433832083def774dcd8c4677c3`. Licence: NASA images and media
+  "generally are not subject to copyright in the United States" (NASA media guidelines); credit "NASA Earth
+  Observatory", no implied endorsement, NASA insignia not used. It is data, not code, and holds no copyleft;
+  the descriptor and the kit inventory name it `LicenseRef-NASA-Media-Public-Domain` (SPDX's form for a
+  licence its list lacks; it is not on `deny.toml`'s allow-list, which governs code dependencies).
+  - *Why the kit carries it.* It is public domain, so question 251's rule (no copyleft in the kit) allows
+    it; an air-gapped site cannot fetch the original; and a rebuild only reproduces the recorded hash
+    with libjpeg-turbo 3.2.0 and the same encoder options, which the site may not have. Carried bytes,
+    verified, are the one form that always works.
+  - *How.* `build_kit.py --copy-pack imagery-bluemarble [--imagery-dir DIR]` (default
+    `~/altavista-data/imagery/bluemarble`, outside the repository) copies it to `packs/imagery-bluemarble/`.
+    The builder first verifies the pyramid against its own `manifest.json` (every file, no unlisted file, the
+    full tile set, `pyramid_sha256`) and refuses a mismatch, an incomplete pyramid or a size over
+    `--max-pack-bytes`. `KIT_MANIFEST.packs.imagery-bluemarble.imagery` records `pyramid_sha256`, the counts,
+    the original's sha256 and URL, the encoder line and the licence. The installer verifies it again before
+    the target exists, and again after the copy; a kit built without the pack installs as before, and the
+    viewer then says the basemap is not installed. The installer does not start the viewer: start it with
+    `<target>/venv/bin/python -m altavista serve --imagery-dir <target>/kit/packs/imagery-bluemarble`
+    (`INSTALL_RECORD.installed.imagery` and the installer's last lines print that path).
+  - *The original is not carried* (27,201,049 bytes, sha256
+    `d225f1f35a6448a4d1d8f6de6e48f3433e470085b70a35800e64f384f269a7b0`, one JPEG): it is unnecessary once the
+    pyramid is verified. A site that wants to rebuild the pyramid fetches the original once, by the recorded
+    URL in the descriptor, checks its sha256, and runs the generator, which is in the repository (not in the
+    kit): `.venv/bin/python -I scripts/imagery/build_blue_marble_tiles.py --original FILE --out DIR`, with
+    libjpeg-turbo's `cjpeg` and `djpeg` on `PATH`. The rebuilt `pyramid_sha256` equals the recorded one only with
+    libjpeg-turbo 3.2.0 and the same options (`-quality 88 -optimize -dct int -sample 2x2`); with another
+    version the tiles differ in bytes, and `--verify` of that rebuild checks it against its own new manifest,
+    not against the kit's hash.
 - **Python wheels (`--with-wheels`).** The linux/aarch64/cp313 closure is 24 wheels: the viewer's
   runtime dependencies and the `altavista` wheel itself, and not numpy (item 7). The closure includes
   `httpx` and `pyyaml`, which were imported by the viewer at run time but undeclared, so an installed

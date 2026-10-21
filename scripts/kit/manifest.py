@@ -142,6 +142,23 @@ changed and why:
   is not on `develop`), the top-level shape of `KIT_MANIFEST` is unchanged (one added entry in
   `files`), and the installer's refusal names the missing document instead of guessing, so a format-5 kit
   built a commit earlier fails with a message that says what to rebuild.
+- **Question 264: the kit carries the Blue Marble tile pyramid** (`IMAGERY_PACK`, `imagery-bluemarble`),
+  the manager's decision of the heavy-basemap round. NASA media are public domain in the US
+  (question 251 allows the kit to carry them), an air-gapped site cannot fetch the original, and a
+  rebuild only reproduces the recorded `pyramid_sha256` with libjpeg-turbo 3.2.0 and the same options,
+  which the site may not have. The pack is the one whose source is OUTSIDE the repository
+  (`~/altavista-data/imagery/bluemarble`, `build_kit.py --imagery-dir`), so it is not in `PACKS`
+  (repo-relative paths) but in `EXTERNAL_PACKS`; `imagery_pack_descriptor` replaces `pack_descriptor`
+  for it and records no host path (`source_path` and `resolved_real_path` are `None`). Before a
+  descriptor exists the pyramid is verified against its OWN `manifest.json` (`verify_imagery_pyramid`:
+  every listed file present with its size and sha256, no unlisted file, the tile set its levels imply,
+  `pyramid_sha256`), and a mismatch, an incomplete pyramid or a symlink is refused
+  (`ImageryPyramidError`), as is a pyramid over `--max-pack-bytes` (`PackTooLargeError`). The bytes are
+  copied by `copy_pack_bytes` like any other pack, so they fall out of the `files` walk (role
+  `pack-file`). The descriptor carries an `imagery` key (one added key on one pack, like GMAT's
+  `operator_supplied`): `pyramid_sha256`, counts, the original's sha256 and URL (the original is NOT
+  carried), the encoder line, the licence. `kit_format` stays 5 for that reason. The installer verifies
+  the carried pyramid again before it is used (`install.verify_carried_imagery`), by this same function.
 
 # Decision I -- why the builder only ever collects and hashes (round 1, unchanged in round 2)
 
@@ -415,6 +432,12 @@ PACKS: dict[str, str] = {
 #: it along with those two packs -- nothing is copied unconditionally any more, `data-time` stays
 #: descriptor-only unless `--copy-pack data-time` is also passed.
 DEFAULT_PACK = "data-time"
+
+#: Question 264: the Blue Marble tile pyramid, a pack whose source lives OUTSIDE the repository, so its
+#: value is not a repo-relative path (`PACKS`) but the name of the builder flag that names it. It is
+#: described and copied like any other pack (`--with-pack` / `--copy-pack`), only the source differs.
+IMAGERY_PACK = "imagery-bluemarble"
+EXTERNAL_PACKS: dict[str, str] = {IMAGERY_PACK: "--imagery-dir"}
 
 #: Question 250(a), task 2: the packs the kit never carries. Pack name -> the id of the component in
 #: `operator_supplied.json` that pins it (`docs/kit-operator-supplied.md` item 3 for GMAT). The kit
@@ -875,6 +898,215 @@ def copy_pack_bytes(name: str, source_path: Path, kit_root: Path) -> dict:
         "copied_file_count": copied_file_count,
         "copied_symlink_count": copied_symlink_count,
         "copied_total_bytes": copied_total_bytes,
+    }
+
+
+# =================================================================================================
+# Question 264: the Blue Marble tile pyramid (a copied data pack from outside the repository)
+# =================================================================================================
+
+#: What `scripts/imagery/build_blue_marble_tiles.py` writes, as that script defines it (FORMAT, BODY_FILE).
+IMAGERY_FORMAT = "altavista-imagery-pyramid/1"
+IMAGERY_BODY_FILE = "body/earth-2048x1024.jpg"
+IMAGERY_MANIFEST_NAME = "manifest.json"
+#: The deepest level a manifest may claim; the generator builds 0..5. Bounds the expected-tile loop so a
+#: hostile manifest cannot ask for 2**60 tiles.
+IMAGERY_MAX_LEVEL_LIMIT = 8
+
+#: The licence the descriptor records. Not code, so it is not an SPDX licence id and not on `deny.toml`'s
+#: allow-list (`licences.py` evaluates code dependencies); `LicenseRef-...` is SPDX's syntax for a licence
+#: the list does not have, kept for display and for an SBOM entry if one is ever wanted. The pyramid holds
+#: no copyleft: NASA images and media "generally are not subject to copyright in the United States".
+IMAGERY_LICENCE = (
+    "public domain in the US (NASA images and media are generally not subject to copyright), "
+    "NASA media guidelines; credit NASA Earth Observatory; no implied endorsement; NASA insignia not used"
+)
+IMAGERY_LICENCE_SPDX = "LicenseRef-NASA-Media-Public-Domain"
+
+
+class ImageryPyramidError(RuntimeError):
+    """The Blue Marble pyramid is missing, incomplete or does not match its own manifest (builder), or the
+    carried copy does not match what the kit recorded (installer). `problems` lists what was found."""
+
+    def __init__(self, message: str, problems: Optional[list] = None) -> None:
+        super().__init__(message)
+        self.problems = list(problems or [])
+
+
+def _imagery_pyramid_digest(files: dict) -> str:
+    """The generator's `pyramid_digest`: sha256 of the lines `"<path> <sha256>\\n"`, sorted by path."""
+    h = hashlib.sha256()
+    for rel in sorted(files):
+        h.update(f"{rel} {files[rel]['sha256']}\n".encode("utf-8"))
+    return h.hexdigest()
+
+
+def read_imagery_manifest(root: Path) -> dict:
+    """The pyramid's own `manifest.json` as a dict; `ImageryPyramidError` if absent or not JSON."""
+    path = root / IMAGERY_MANIFEST_NAME
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise ImageryPyramidError(f"{path} could not be read as the pyramid's manifest ({type(e).__name__}: {e})") from e
+    if not isinstance(doc, dict):
+        raise ImageryPyramidError(f"{path} is not a JSON object")
+    return doc
+
+
+def verify_imagery_pyramid(root: Path) -> list[str]:
+    """Problems found re-hashing the pyramid at `root` against its own `manifest.json` (empty list = good).
+
+    The same checks as `scripts/imagery/build_blue_marble_tiles.py::verify` (every listed file present with
+    the listed size and sha256, no unlisted file, the tile set the levels imply plus the body image,
+    `pyramid_sha256` recomputed, `tile_count` and `total_bytes`), reimplemented here rather than imported:
+    that script imports numpy at module level and the installer, which runs this, is standard library only.
+    `tests/test_kit_imagery.py` runs both over the same trees so they cannot drift. Two checks the generator
+    does not make, because the tree is untrusted input here: a manifest key that is absolute or climbs out of
+    the tree (`..`) is a problem and is never opened, and any symlink in the pyramid is a problem."""
+    problems: list[str] = []
+    mpath = root / IMAGERY_MANIFEST_NAME
+    if not mpath.is_file():
+        return [f"{IMAGERY_MANIFEST_NAME} missing"]
+    try:
+        m = json.loads(mpath.read_text(encoding="utf-8"))
+        files = m["files"]
+        max_level = m["max_level"]
+        min_level = m["min_level"]
+        if not isinstance(files, dict) or not all(
+            isinstance(v, dict) and isinstance(v.get("bytes"), int) and isinstance(v.get("sha256"), str)
+            for v in files.values()
+        ):
+            raise ValueError("files is not a mapping of path -> {bytes, sha256}")
+        if not (isinstance(min_level, int) and isinstance(max_level, int)
+                and 0 <= min_level <= max_level <= IMAGERY_MAX_LEVEL_LIMIT):
+            raise ValueError(f"levels {min_level!r}..{max_level!r} are not within 0..{IMAGERY_MAX_LEVEL_LIMIT}")
+    except (ValueError, KeyError, TypeError) as e:
+        return [f"{IMAGERY_MANIFEST_NAME} unreadable: {e!r}"]
+    if m.get("format") != IMAGERY_FORMAT:
+        problems.append(f"manifest format {m.get('format')!r}, expected {IMAGERY_FORMAT!r}")
+    expected = {IMAGERY_BODY_FILE}
+    for level in range(min_level, max_level + 1):
+        for x in range(2 ** (level + 1)):
+            for y in range(2 ** level):
+                expected.add(f"{level}/{x}/{y}.jpg")
+    for rel in sorted(expected - set(files)):
+        problems.append(f"manifest does not list expected file {rel}")
+    for rel in sorted(set(files) - expected):
+        problems.append(f"manifest lists unexpected file {rel}")
+    for rel in sorted(files):
+        parts = rel.split("/")
+        if rel.startswith("/") or "\\" in rel or ".." in parts or "" in parts:
+            problems.append(f"manifest lists an unsafe path {rel!r}")
+            continue
+        p = root / rel
+        if p.is_symlink() or not p.is_file():
+            problems.append(f"missing file {rel}")
+            continue
+        digest, size = sbom.sha256_file(p), p.stat().st_size
+        if size != files[rel]["bytes"]:
+            problems.append(f"{rel}: {size} bytes, manifest says {files[rel]['bytes']}")
+        if digest != files[rel]["sha256"]:
+            problems.append(f"{rel}: sha256 {digest}, manifest says {files[rel]['sha256']}")
+    on_disk: set[str] = set()
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        for name in [*dirnames, *filenames]:
+            full = Path(dirpath) / name
+            if full.is_symlink():
+                problems.append(f"symlink in the pyramid: {full.relative_to(root).as_posix()}")
+        for name in filenames:
+            full = Path(dirpath) / name
+            if not full.is_symlink():
+                on_disk.add(full.relative_to(root).as_posix())
+    on_disk.discard(IMAGERY_MANIFEST_NAME)
+    for rel in sorted(on_disk - set(files)):
+        problems.append(f"file on disk not in manifest: {rel}")
+    if m.get("pyramid_sha256") != _imagery_pyramid_digest(files):
+        problems.append("pyramid_sha256 does not match the file list")
+    if m.get("tile_count") != len(files) - 1:
+        problems.append(f"tile_count {m.get('tile_count')} but {len(files) - 1} tile entries")
+    if m.get("total_bytes") != sum(f["bytes"] for f in files.values()):
+        problems.append("total_bytes does not match the file list")
+    return problems
+
+
+def imagery_problems_message(problems: list[str], limit: int = 8) -> str:
+    shown = "; ".join(problems[:limit])
+    more = f"; ... and {len(problems) - limit} more" if len(problems) > limit else ""
+    return f"{len(problems)} problem(s): {shown}{more}"
+
+
+def imagery_pack_descriptor(
+    name: str, source_dir: Path, *, max_pack_bytes: int = DEFAULT_MAX_PACK_BYTES,
+) -> dict:
+    """The pack descriptor for the Blue Marble pyramid at `source_dir` (question 264). Same fields as
+    `pack_descriptor`, except that the source is outside the repository: `source_path` and
+    `resolved_real_path` are `None` (nothing about the build host's layout is recorded) and
+    `outside_repository` is `True`. Plus `imagery`: `pyramid_sha256`, counts, the original (sha256, URL,
+    size, NOT carried), the encoder line, the licence.
+
+    Order, cheapest refusal first and all of them before a byte is copied or written: not a directory
+    (`ImageryPyramidError`), over `max_pack_bytes` (`PackTooLargeError`, from a stat-only walk, before any
+    hashing), then `verify_imagery_pyramid` (`ImageryPyramidError` listing what differs), then the hash."""
+    if not source_dir.is_dir():
+        raise ImageryPyramidError(
+            f"pack {name!r}: {source_dir} is not a directory -- the Blue Marble pyramid is not there. Build it "
+            f"with scripts/imagery/build_blue_marble_tiles.py or name it with {EXTERNAL_PACKS[IMAGERY_PACK]}"
+        )
+    real = Path(os.path.realpath(source_dir))
+    files = list(_iter_pack_files(real))
+    total_bytes = sum(f.stat().st_size for f in files)
+    if total_bytes > max_pack_bytes:
+        raise PackTooLargeError(
+            f"pack {name!r} is {total_bytes} bytes, over the {max_pack_bytes} byte --max-pack-bytes limit -- "
+            f"refusing to hash or copy it rather than silently skipping it (Decision K); pass a larger "
+            f"--max-pack-bytes if you really want this pack included, or leave it out"
+        )
+    problems = verify_imagery_pyramid(real)
+    if problems:
+        raise ImageryPyramidError(
+            f"pack {name!r}: the pyramid does not match its own manifest.json -- refusing to put it in a kit "
+            f"({imagery_problems_message(problems)}). Rebuild it, or check it with "
+            f"scripts/imagery/build_blue_marble_tiles.py --verify DIR",
+            problems,
+        )
+    m = read_imagery_manifest(real)
+    original = m.get("original") or {}
+    encoder = m.get("encoder") or {}
+    encoder_line = (
+        f"cjpeg: {encoder.get('cjpeg')}; djpeg: {encoder.get('djpeg')}; options: {' '.join(encoder.get('args') or [])}"
+    )
+    return {
+        "name": name,
+        "source_path": None,
+        "resolved_real_path": None,
+        "in_worktree": False,
+        "outside_repository": True,
+        "via_symlink": source_dir.is_symlink(),
+        "content_hash": _pack_content_hash(real, files),
+        "file_count": len(files),
+        "total_bytes": total_bytes,
+        "copied": False,
+        "copy": None,
+        "imagery": {
+            "format": m["format"],
+            "pyramid_sha256": m["pyramid_sha256"],
+            "file_count": len(m["files"]),
+            "tile_count": m["tile_count"],
+            "total_bytes": m["total_bytes"],
+            "min_level": m["min_level"],
+            "max_level": m["max_level"],
+            "original": {
+                "file": original.get("file"), "bytes": original.get("bytes"), "sha256": original.get("sha256"),
+                "url": original.get("url"), "width": original.get("width"), "height": original.get("height"),
+                "carried": False,
+            },
+            "encoder": encoder_line,
+            "attribution": m.get("attribution"),
+            "licence": IMAGERY_LICENCE,
+            "licence_spdx": IMAGERY_LICENCE_SPDX,
+            "licence_is_code": False,
+            "copyleft": False,
+        },
     }
 
 
