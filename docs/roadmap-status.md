@@ -1,7 +1,7 @@
 # Roadmap status
 
 As of 2026-10-19, against the phase table in `architecture.md`. Decisions are numbered in
-`open-questions.md` (1–264); each track's plan records its rounds and its `## Delivered` section.
+`open-questions.md` (1–265); each track's plan records its rounds and its `## Delivered` section.
 
 ## By phase
 
