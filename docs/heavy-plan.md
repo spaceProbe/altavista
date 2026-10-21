@@ -4603,3 +4603,278 @@ tree that lacks `13200ed`. The pytest re-run left the count at 52 (52 → 52).
   the merge.
 - **Compliance**: no SBOM moves for this round; the lead regenerates at the merge regardless.
 - **`target/debug/deps`** grew from 546 to 62,110 entries during the gate, under question 236's threshold.
+
+## Status (heavy manager, 2026-10-21) — the Blue Marble basemap round (question 264)
+
+This round does not reopen the plan. It answers the user's report "I am not reliably seeing an earth
+map" with a real, offline Earth basemap for the tiled globe and the 2D map (question 264, answering
+question 132's open half). `## Delivered` stands. No proto and no Rust source changed. The lead's
+rulings during the round are cited where they apply.
+
+### What landed, one commit per accepted task
+
+| Commit | What |
+| --- | --- |
+| `6d7435c` | Task 2: `scripts/imagery/build_blue_marble_tiles.py`, the reproducible pyramid generator, and its synthetic-plate tests. |
+| `7932e41` | Task 6: the kit carries the pyramid as the verified `imagery-bluemarble` pack. |
+| `7a28ed0` | Tasks 3 and 4: the server serves the pyramid; every profile points at it; "not installed" is visible; Earth without GMAT uses the pyramid's body image; the health defect (D4) and the missing-directory 500 (D5). |
+| `ffea9e7` | Task 5: the orientation proof in real Chrome, the geometry contract, and the globe's three defects (D1 to D3). |
+| `1a7dca7` | No body is published with a texture the server cannot serve (D6). |
+| `84602d2` | The level floor: the default view's tiled globe is as sharp as the plain body (D7). |
+| `0c70f53` | The layers-panel repaint test's probe sized from the display step (D8, found by the gate). |
+| this commit | this status section |
+
+### The reproduction (before)
+
+Measured in real headless Chrome from an export of `76e1a40` (the driver is the round's
+`scratch/shoot_viewer.py`; the LEO and RPO examples; camera at body-fixed lon 10, lat 30, 3.2 radii):
+
+- every profile's imagery was the 42 flat-colour test tiles (`./fixtures/tiles/`, max level 2);
+- with GMAT present the plain body was the only real Earth (`/textures/ModifiedBlueMarble.jpg`, 2048×1024);
+- turning the tiled globe on (or the RPO layout, which turns it on itself) drew a salmon-red and a cyan
+  hemisphere, the tiles loading correctly with the wrong content;
+- the 2D map was a 4×2 grid of flat colours in every run;
+- without GMAT the three `/textures/*` requests answered 404 and the body was a flat-colour sphere.
+
+### Task 1: the original
+
+- **Product:** Blue Marble: Next Generation with topography and bathymetry, **July 2004**, the 21600×10800
+  plate carrée JPEG. It is the largest single-file whole-world plate NASA serves today (the 500 m product
+  is eight tiles), bathymetry because the base product's deep oceans are one flat blue, July for the
+  northern-summer composite. The Visible Earth page now redirects (301) to science.nasa.gov, and the
+  files are on assets.science.nasa.gov.
+- **URL** (final URL identical, no redirect, HTTP 200):
+  `https://assets.science.nasa.gov/content/dam/science/esd/eo/images/bmng/bmng-topography-bathymetry/july/world.topo.bathy.200407.3x21600x10800.jpg`
+- **27,201,049 bytes**, sha256 **`d225f1f35a6448a4d1d8f6de6e48f3433e470085b70a35800e64f384f269a7b0`**, fetched once
+  (question 154) with `curl -fL --proto '=https' --proto-redir '=https'`, TLS verified, no header of ours (curl's
+  default User-Agent only), nothing identifying the user. Stored outside git at
+  `~/altavista-data/imagery/original/`, with its provenance (headers, ETag, date) beside it.
+- **Licence:** NASA's images and media guidelines: NASA material is "generally not subject to copyright in the
+  United States"; NASA is acknowledged as the source; no implied endorsement; the insignia is not used.
+  **Credit** NASA asks for, on the Blue Marble page: "NASA Earth Observatory". Every profile's `attribution`
+  carries it.
+- No decoder dependency was fetched: the host's libjpeg-turbo 3.2.0 `djpeg`/`cjpeg` (BSD-3-Clause, IJG, zlib)
+  and numpy. The one allowed pinned dependency is unused.
+
+### Task 2: the pyramid
+
+- `globe_lod.js`'s scheme exactly: level L has 2^(L+1) × 2^L 256-pixel tiles, tile y = 0 at the south
+  pole, tile images north-up. Levels **0 to 5** (the deepest without upsampling: 16384 ≤ 21600 < 32768),
+  **2,730 tiles** plus `body/earth-2048x1024.jpg`, **20,600,766 bytes**, `pyramid_sha256`
+  **`58b59438e50ef5ccf454bf96847a3f60b022a1433832083def774dcd8c4677c3`**.
+- Deterministic by construction: the original's sha256 is checked before decoding; the deepest level is
+  an area-weighted resample with exact integer overlaps and fixed-order elementwise float64 arithmetic
+  (no BLAS reduction); each shallower level is an exact integer 2×2 mean. The resampled pixels are designed
+  to be host-independent; the **tile bytes are not claimed identical across encoders**: the hash holds for
+  libjpeg-turbo 3.2.0 with `-quality 88 -optimize -dct int -sample 2x2`, both recorded in the manifest.
+- **Two builds on this host were byte-identical** (2,732 files, 0 differ, `filecmp` with `shallow=False`);
+  23 s, peak resident 1.54 GB (the decoded plate alone is about 700 MB; the docstring says so).
+- The build lands in a `.partial` directory renamed only when whole; `--verify DIR` re-hashes an installed
+  pyramid against its manifest.
+
+### Task 3: serving and profiles
+
+- `python -m altavista serve --imagery-dir DIR` (`create_app(imagery_dir=...)`), default
+  `~/altavista-data/imagery/bluemarble`, served at **`/imagery/bluemarble/`**. Every shipped profile:
+  `url_template: './imagery/bluemarble/{z}/{x}/{y}.jpg'`, `max_level: 5`, NASA's credit.
+- At start-up the server reads the manifest and checks that every listed file is present at its size (one
+  INFO line with the level, count and hash, or one WARNING naming the directory and the build command); it
+  does not hash (that is `--verify`). The verdict rides on `scenario.imagery` as `installed` and, when false,
+  a `notice`.
+- **Not installed:** the globe checkbox and the RPO layout build no tiles, keep the plain body and the
+  globe info line says the basemap is not installed and how to build it; the 2D map shows the same notice
+  (wrapped in a narrow panel) over its ground tracks. Nothing falls back to the test colours.
+- The tests keep the flat-colour fixture through tests-only profiles with the shipped ids
+  (`tests/fixtures/profiles/`, absent from the wheel, checked in one real offline wheel build), so no test
+  needs the network or the real pyramid; the suite passed with the pyramid installed and with it absent.
+  `.claude/launch.json` works unchanged (health reports the pyramid installed; tile `0/0/0.jpg` 200).
+
+### Task 4: the plain body
+
+- **With GMAT present the body keeps GMAT's `ModifiedBlueMarble.jpg`** (the manager's decision: it is GMAT's
+  own picture, which this viewer mirrors; the orientation proof holds it to the tiled globe's orientation).
+  GMAT's image is re-graded brighter than NASA's original, so the two are compared for orientation, not colour.
+- **Without it**, Earth is published with the pyramid's `body/earth-2048x1024.jpg` (level 2, the same size).
+  Any other body whose GMAT texture is absent publishes no texture and draws its flat colour (D6), and Earth
+  with neither image does too; the imagery notice stays the visible signal.
+
+### Task 5: the orientation proof
+
+- `tests/test_viewer_basemap_orientation_browser.py`, real Chrome, against the **original** decoded
+  independently (`djpeg -scale 1/8`, never the pyramid). A reference-only test shows its probes tell a
+  north-south flip, an east-west mirror, a 180° shift and a rotation apart.
+  - 2D map, through the real `render()`: 16 probes at levels 1 and 3 (Sahara, Amazon, Greenland,
+    Antarctica, the Pacific, points straddling (0, 0) and the date line): worst colour error 6.9 of 15.
+  - Tiled globe, 9 views at 3.2, 1.5 and 1.15 radii (levels up to 5): the ray through each probe's pixel
+    hits within 1.5° of it, on the tile `tileBoundsDeg` names with that tile's URL; colour worst 12.4 of 20;
+    the centre tile is at level ≥ 2 at 3.2 and 1.5 R and level 5 at 1.15 R.
+  - Body against globe: with GMAT, Pearson r 0.976 (orientation margin 1.2); with the pyramid's body
+    image, error 6.1 and r 0.9997.
+  - Zero page exceptions or console errors on all three CDP signals; no request leaves 127.0.0.1.
+- **Perturbations:** pyramid copies made south-up, east-west mirrored and 180°-shifted fail 3 tests each, each
+  message naming the wrong picture it matches; `globe.js` with the `flipY` line removed or the winding
+  reversed fails; the manager's own run with `flipY` removed fails the geometry check (20 passed, 3 failed).
+- **Which proof runs where:** `web/js/globe_geometry_check.mjs` (the mesh contract: outward winding, upright
+  UVs with unflipped textures, vertices on their tile, no quad over 3°, each predicate shown able to fail)
+  runs in the **default gate**, as a node check and through `tests/test_viewer_globe.py`. The real-Chrome
+  orientation test needs Chrome, `djpeg`, the real pyramid and the original, and **skips with its reason**
+  otherwise; it ran on this host.
+
+### Task 6: the kit
+
+- **The kit carries the pyramid** (the manager's decision): the `imagery-bluemarble` pack, the one pack whose
+  source is outside the repository (`build_kit.py --copy-pack imagery-bluemarble [--imagery-dir DIR]`).
+  **20,934,142 bytes in 2,732 files**, under the **unchanged** 50,000,000-byte `--max-pack-bytes` cap; a
+  default kit grows from 5.59 MB to 27.06 MB. It is public domain (question 251 allows it), an air-gapped site
+  cannot fetch the original, and a rebuild reproduces the recorded hash only with libjpeg-turbo 3.2.0 and the
+  same options. The original (27 MB) is not carried; `docs/kit-operator-supplied.md` says how a site rebuilds
+  the pyramid if it wants to.
+- The builder verifies the pyramid against its own manifest (every file, no unlisted file or symlink, the full
+  tile set, the hash) before writing anything; the descriptor records the hash, counts, the original's sha256
+  and URL, the encoder line and `LicenseRef-NASA-Media-Public-Domain`, and no host path. The installer verifies
+  it before the target exists and again after the copy, with typed `imagery-*` refusals, and prints the
+  `--imagery-dir` to start the viewer with. The kit's verifier is standard library only; a test keeps it in
+  parity with the generator's.
+- **Verified up to the installer's wheel gate; the full install is run by the lead at the merge.** A kit built
+  here with the pack: the installer refuses it at the wheel gate, by design (`wheels.collected` false, and a
+  `--with-wheels` build needs the network). The kit's own bundled `verify_carried_imagery` passes on it, and the
+  viewer served from the kit's pack tree reports the basemap installed (health: max level 5, 2,730 tiles, the
+  hash) and serves `5/40/20.jpg`.
+
+### Defects found, and their root causes
+
+- **D1, the tiled globe was inside out** (since M15.4). `buildTileMesh`'s triangles `(a,c,b),(b,c,d)`, with i
+  east and j north, are clockwise seen from outside, so three.js culled the near hemisphere and drew the inside
+  of the far one: a camera over (0°, 0°) saw (0°, 180°), over Greenland (72N 40W) it saw (72S 140E); every
+  hit's face normal was opposite the outward normal. Fixed: `(a,b,c),(b,d,c)`.
+- **D2, every tile was drawn north-south flipped** (since M15.4). `THREE.TextureLoader` images upload with
+  `flipY = true`, while the mesh gives the south edge v = 1; over Greenland it drew Antarctic-like ice (error 220.7
+  against the original, 1.7 against the flipped original). The gateway's `ImageBitmap` path ignores `flipY` and
+  was upright. Fixed in `applyTileTexture`, which every texture passes: `flipY = false`.
+- **Why the fixture hid D1 and D2:** one flat colour per tile, and at level 0 the far side's inside is still a
+  disc of the right colour; nothing pinned winding or UV direction. The real basemap would have been shown
+  inside out and upside down.
+- **D3, a faceted globe.** A fixed 8 quads per tile gave 22.6° facets (about 120 km of sagitta) at levels 0 and
+  1. `segmentsForLevel(level) = max(8, 64 >> level)` holds them at 2.8°; `opts.segments` still forces a count.
+- **D4, `/api/health` said `textures: true` for an empty texture directory.** It tested only that the directory
+  exists. It now reports whether a texture file is there, which Earth texture is published (computed by the
+  same function `put()` uses) and the pyramid's verdict.
+- **D5, a static mount of a missing directory answered 500.** Starlette's `StaticFiles(check_dir=False)`
+  repeats the check on the first request and raises; the pyramid mount now answers 404.
+- **D6, bodies other than Earth requested textures that 404.** `Hub.put` handled only Earth; Sun, Luna and the
+  planets kept the `/textures/<file>` URLs without GMAT. Measured after the fix, empty `--textures` with the
+  pyramid: LEO 65 requests and RPO 66, all 200, none to `/textures/`.
+- **D7, the default view's tiled globe was softer than the plain body.** At 3.2 R even level 0's screen-space
+  error is 5.6 px, under the 24 px threshold, so it stayed at level 0 (78 km texels). A lower threshold let
+  `maxTiles` bind and coarsened the close views (1.15 R fell from level 5 to 4 or 3); a larger `maxTiles` filled
+  the 64 MiB budget. Fixed with a level floor (lead's ruling, option A): `minLevel`, default 2, clamped to
+  `maxLevel`, counted against `maxTiles`; threshold and cap unchanged. Cost in real Chrome (887×642 pane):
+  3.2 R from 2 to 32 tiles and 0.52 to 8.39 MB; 1.5 R from 14 to 32 tiles; 1.15 R from 32 to 47 tiles with its
+  centre still at level 5; the cap never binds; the selection's p95 stays at 0.1 to 0.5 ms of the 16.7 ms frame.
+  With the old default the orientation test's level assertion fails.
+  - `bodies_viewport_precision_check.mjs` pins `segments: 8, minLevel: 0` so its recorded "before" numbers
+    compare like with like. Run unpinned (the manager, in a scratch copy), every bounded check still passes (the
+    1 mm placement bound, question 46's 1 cm near the origin, the picks); only the recorded-equality rows of the
+    globe class move. Floor only: 717 passed, 4 failed; unpinned values beside the pinned ones are LEO/fit
+    3.898 (3.800), GEO/fit 7.235 (7.189), GEO/framed 4.397 (4.532), lunar/fit 39.66 (34.34). Both pins removed:
+    715 passed, 6 failed (also LEO/framed 0.827 (0.877), lunar/framed 0.700 (0.694)).
+- **D8, the layers-panel repaint test's premise broke under the floor** (found by the gate). Its probe bumped
+  `residentBytes` by 1024 B per 100 ms tick, about 52 KB over its window, to show the budget text keeps updating.
+  With the floor the resident set is exactly 8.0 MB and `formatBytes` displays 0.1 MB steps, so the text never
+  changed (4 of 4 failures at `84602d2`) although the panel repainted correctly. The bump is now two display steps
+  at the starting magnitude, derived from `formatBytes`' own units, and the probe asserts the text must change.
+  Proof: 3 of 3 passes (4,195 B per tick, 8.0 → 8.2 MB); a scratch copy with the old bump fails 2 of 2; no other
+  test shares the premise.
+
+### Decisions taken this round (numbered for the lead's log)
+
+1. The product: BMNG topography and bathymetry, July 2004, 21600×10800 (manager; accepted by the lead).
+2. No decoder dependency: the host's libjpeg-turbo 3.2.0 tools and numpy (manager; accepted).
+3. The pyramid's hash is stated for libjpeg-turbo 3.2.0 with the recorded options; no cross-platform byte claim
+   (lead).
+4. The pyramid layout and manifest (`altavista-imagery-pyramid/1`) fixed by the manager so the generator and the
+   server were built in parallel.
+5. With GMAT present the body keeps GMAT's texture (manager).
+6. The kit carries the pyramid; the cap is not raised; the original is not carried (manager, within the lead's
+   rule that an over-cap pyramid would have been an operator-built pack).
+7. The serving worker's decisions, accepted by the lead: the 2D map stays at level 1; the globe checkbox stays
+   unchecked when the basemap is not installed; the verdict keys are `installed` and `notice` only; the check runs
+   once at start-up (restart after building); fixture profiles reuse the shipped ids; the start-up log prints the
+   actual `--textures` value. Its fifth (Earth keeps its `/textures/` URL with neither image) was reversed by D6.
+8. The kit worker's decisions, accepted by the lead: the verifier is reimplemented standard-library-only in
+   `manifest.py` with a parity test (which runs wherever numpy is present, so always in the gate); it also rejects
+   absolute or `..` paths and symlinks and caps `max_level` at 8; `--imagery-dir` without the pack is refused and
+   `--with-pack` records the descriptor only; the licence id `LicenseRef-NASA-Media-Public-Domain`, outside
+   `deny.toml`; `kit_format` stays 5; the installer prints and records the serve command and does not start the
+   viewer; `PackTooLargeError` is a refusal for every pack.
+9. The orientation worker's decisions, accepted by the lead:
+   1. The reference truth is the original via `djpeg -scale 1/8`, not the pyramid's level-5 tiles, being the
+      stronger, independent truth.
+   2. Test paths come from `AV_BASEMAP_DIR`, `AV_BASEMAP_ORIGINAL` and `AV_BASEMAP_SHOTS`, read only, never
+      assigned (precedent `AV_BODIES_DUMP`); the server under test is configured by `--imagery-dir` and
+      `--textures` only.
+   3. GMAT's re-graded texture is held to orientation (aggregated hypothesis margin 1.2, Pearson r ≥ 0.9,
+      body-against-globe ≤ 90); the pyramid's body image to colour (20) and margin 2.
+   4. The fix keeps the UV formula and sets `flipY = false` in `applyTileTexture`, so the TextureLoader and
+      ImageBitmap paths agree in one place.
+   5. `segmentsForLevel(level) = max(8, 64 >> level)` replaces the fixed 8; the bodies precision check pins
+      `segments: 8`.
+   6. A node check pins the mesh contract with controls that must fail, run by a pytest wrapper.
+   7. A 2000×760 window, with probes kept inside the close views' field and off-canvas probes reported.
+   8. A screenshot is retried when every probe reads pure 255 (a blank first frame after shader compile, seen
+      once).
+   9. A README line in its "Tests" section.
+10. The level floor, option A, `minLevel` default 2 (lead's ruling on the worker's measurements).
+
+### Gates
+
+The gate ran at `84602d2` (every code commit of the round but D8's test fix) with the round's `gate/run_gate.sh`, phases in
+sequence, each phase's whole output captured. The docker lock was never held by the gate itself.
+
+| Gate | Result |
+| --- | --- |
+| `buf breaking proto --against /Users/probe/code/AltaVista/proto` / `buf lint proto` | **clean, exit 0** |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | **185 binaries, 1945 passed, 0 failed, 4 ignored**, 1839 s |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **clean** |
+| the same clippy for `av-kernel`, `av-run`, `av-sweep` with `--no-default-features` | **clean** each |
+| required-features lint (its steps through `cargo-slot`) | **clean**: 5 groups |
+| `cargo deny check` | **advisories ok, bans ok, licenses ok, sources ok** |
+| `cargo test -p av-orbital --no-default-features` | **15 binaries, 142 passed, 0 failed** |
+| `cargo-slot build -p av-edge-board --bins` | **built** |
+| `cargo test -p av-kernel --no-default-features` | **21 binaries, 769 passed, 0 failed** |
+| `cargo test -p av-kernel --no-fail-fast` | **58 binaries, 1032 passed, 0 failed, 1 ignored**, 649 s |
+| Renode (`drm_attitude_control_renode`) / stand-in HIL (`hil_standin_renode`) | **1 passed / 1 passed** |
+| every `web/js/**/*_check.mjs` | **31 of 35 exit 0**; the four argument-driven harnesses print their usage (`command_panel`, `panels`, `timeline` exit 2; `layers_stream` 1), as before |
+| the real-Chrome viewer tests (now with the globe, imagery-status and orientation files) | **76 passed**, 426 s |
+| `regenerate_compliance.py --check` | **up to date** |
+| pytest (`-q -rs`) | **1909 passed, 2 failed, 31 skipped**, 949 s |
+
+The 31 skips are the visible opt-ins (`AV_KIT_*`, `AV_SBOM_REBUILD`, the unbuilt proof kit,
+`AV_CFS_RUN_REPRO_BUILD`, live evidence). The two failures:
+
+- **`test_viewer_layers_panel_repaint.py::test_layers_panel_repaints_only_on_state_change`, this round's (D8).**
+  Fixed in `0c70f53` (the test's premise; the product untouched). As the lead ruled, the affected files were
+  re-run at `0c70f53`: `test_viewer_layers_panel_repaint.py`, `test_viewer_layers_panel.py` and
+  `test_viewer_layers_stream.py`, **18 passed**. The lead's clone gate at the merge runs the full pytest.
+- **`services/cfs/tests/test_image_digest.py::test_image_digest_matches_recorded_value`, not this round's.**
+  `services/cfs/IMAGE_DIGEST.md` records `cb12795`, and `2bf7aa6` (on `develop` before this round's base, touching
+  `crates/av-lockstep-shim`, a cFS copied path) has landed since (question 232). The lead re-pinned the image at
+  `d1ea959`, before `2bf7aa6`, so `develop` has carried a stale cFS record since that merge; the lead re-pins at
+  this merge. No path the image copies changed in this round.
+
+**Dangling volumes**: 53 at the round's start, 53 at the gate's start and 53 at its end; no phase changed it.
+**`target/debug/deps`**: 97,766 entries at the gate's start (under cargo-slot's 100,000 threshold, so not moved),
+146,652 at its end; moved aside at the end of the round (question 236).
+
+### What is not delivered, and what remains, each with its reason
+
+- **The full zero-egress install with the pyramid** is the lead's at the merge (`--with-wheels` is question 154's
+  build-time network exception).
+- **Terrain:** with the globe on, the layer manager reports 2 failed terrain requests
+  (`TerrainLoaderNotImplementedError`, "no loader is implemented"). Pre-existing and out of scope.
+- **Browser tests under a changed `HOME`** hung or failed in the serving worker's runs ("no viewer on window" after
+  330 s in one; a stall at about 72 % after 14 min in another). Unproven: nobody ran the base tree (`76e1a40`) the
+  same way, so it is not attributed to this round or cleared of it.
+- **The not-installed check is a size check at start-up**; a pyramid built after the server started needs a
+  restart, and only `--verify` proves the bytes.
+- **Compliance:** no SBOM moves for this round; the lead regenerates at the merge.
