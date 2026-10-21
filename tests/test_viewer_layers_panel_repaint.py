@@ -478,7 +478,21 @@ _PROBE_JS = r"""
     const budgetTextBefore = ddBefore ? ddBefore.textContent : null;
     const ddNodeBefore = ddBefore;
     const residentBytesAtStart = viewer.layerManager.residentBytes;
-    const bumpTimer = setInterval(() => { viewer.layerManager.residentBytes += 1024; }, 100);
+    // The bump is sized from the panel's own DISPLAY STEP, not a fixed byte count. `formatBytes`
+    // shows one decimal of the largest unit, so the smallest change the panel can display is a tenth
+    // of that unit (0.1 MB = 104,858 B at 8 MB). A fixed 1024 B per tick (about 52 KB over the
+    // window) moved the text only while the resident set was a few KB; with the globe's level floor
+    // (question 264: 32 level-2 tiles = exactly 8.0 MB resident) it never did, and this assertion
+    // failed deterministically although the panel was repainting correctly. So the total bump over
+    // the ~52 timer ticks is two display steps at the starting magnitude (and at least the old
+    // 1024 B per tick), and the probe checks with `formatBytes` itself that the text must change.
+    let unitBytes = 1;
+    while (unitBytes * 1024 <= Math.max(residentBytesAtStart, 1)) unitBytes *= 1024;
+    const bumpTicks = 50; // the 5.2 s window at one bump per 100 ms is 52 ticks; 50 is a safe lower bound
+    const bumpBytes = Math.max(1024, Math.ceil((2 * unitBytes / 10) / bumpTicks));
+    out.bumpBytesPerTick = bumpBytes;
+    out.displayedTextMustChange = mod.formatBytes(residentBytesAtStart) !== mod.formatBytes(residentBytesAtStart + bumpBytes * bumpTicks);
+    const bumpTimer = setInterval(() => { viewer.layerManager.residentBytes += bumpBytes; }, 100);
     await new Promise((r) => setTimeout(r, 5200)); // > 10 tick periods at the panel's own 500ms throttle
     clearInterval(bumpTimer);
     const rebuildAfterIdle = mod.structuralRebuildCount;
@@ -583,6 +597,10 @@ def test_layers_panel_repaints_only_on_state_change(live_server):
     assert value.get("residentBytesGrewDuringIdle") is True, (
         f"viewer.layerManager.residentBytes never grew during the idle window -- the probe's "
         f"own timer did not run: {value!r}"
+    )
+    assert value.get("displayedTextMustChange") is True, (
+        f"the probe's own bump is too small to change what formatBytes displays at this resident size "
+        f"(a test premise error, not a panel defect): {value!r}"
     )
     assert value.get("budgetTextBeforeIdle") != value.get("budgetTextAfterIdle"), (
         "the streaming-budget text never changed across 5s of idle even though the real, "
